@@ -114,10 +114,11 @@ class GoogleSheetsClient:
 
     def fetch_table(self, tab_name: str) -> SheetTable:
         self._logger.debug("Fetching sheet '%s'", tab_name)
+        safe_name = tab_name if " " not in tab_name else f"'{tab_name}'"
         request = (
             self._service.spreadsheets()
             .values()
-            .get(spreadsheetId=self._sheet_id, range=f"{tab_name}!A:ZZ")
+            .get(spreadsheetId=self._sheet_id, range=safe_name)
         )
         response = request.execute()
         values = response.get("values", [])
