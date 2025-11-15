@@ -1,0 +1,47 @@
+name: Optimizar Posts SEO
+
+on:
+  schedule:
+    - cron: "0 23 * * 0"
+  workflow_dispatch:
+
+jobs:
+  optimize-seo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TZ: America/Bogota
+      SHEET_ID: 1Hwues5snSJFqJRTzEXFmts3N3OpO0Tgpejub_nosl40
+      TARGET_CONTENT_SHEET: Sheet_Final
+      INDEX_SHEET: indice_contenido
+      LOG_SHEET: Logs_Optimización
+      SERP_API_ENGINE: google
+      SERP_API_LOCATION: Colombia
+      OPENAI_MODEL: gpt-4.1
+      MAX_POSTS_PER_RUN: "5"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run SEO optimization pipeline
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+          SERP_API_KEY: ${{ secrets.SERP_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python scripts/optimizar_posts.py \
+            --prompt-file prompts/optimizar_post.txt \
+            --max-posts ${MAX_POSTS_PER_RUN:-5}

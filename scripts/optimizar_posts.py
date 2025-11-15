@@ -1,0 +1,618 @@
+#!/usr/bin/env python3
+"""Automated SEO optimization pipeline script."""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import re
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from string import Template
+from typing import Any, Dict, Iterable, List, Optional
+
+import requests
+from dateutil import parser as date_parser
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from openai import OpenAI
+from zoneinfo import ZoneInfo
+
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+DEFAULT_TIMEZONE = "America/Bogota"
+SERP_API_ENDPOINT = "https://serpapi.com/search.json"
+
+
+def configure_logging(verbose: bool = False) -> None:
+    """Configure root logger formatting."""
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+def load_service_account_credentials(json_blob: str):
+    """Load service account credentials from a JSON blob or file path."""
+    if not json_blob:
+        raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON environment variable is required")
+    try:
+        if json_blob.strip().startswith("{"):
+            info = json.loads(json_blob)
+        else:
+            with open(json_blob, "r", encoding="utf-8") as fh:
+                info = json.load(fh)
+        return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+    except Exception as exc:  # pylint: disable=broad-except
+        raise RuntimeError("Unable to load Google service account credentials") from exc
+
+
+def normalize_header(header: str) -> str:
+    """Normalize header to alphanumeric lowercase token."""
+    return re.sub(r"[^0-9a-z]+", "", header.lower())
+
+
+def column_index_to_letter(idx: int) -> str:
+    """Convert a 1-based column index to spreadsheet column letters."""
+    result = ""
+    while idx > 0:
+        idx, remainder = divmod(idx - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
+
+
+@dataclass
+class SheetRecord:
+    """Holds a single row from a sheet along with metadata."""
+    data: Dict[str, Any]
+    row_number: int
+
+    def get(self, key: str, default: Any = "") -> Any:
+        return self.data.get(key, default)
+
+
+@dataclass
+class SheetTable:
+    """In-memory representation of a Google Sheet tab."""
+    name: str
+    headers: List[str]
+    records: List[SheetRecord]
+
+    def header_index(self, candidate: str) -> Optional[int]:
+        target = normalize_header(candidate)
+        for idx, header in enumerate(self.headers):
+            if normalize_header(header) == target:
+                return idx
+        return None
+
+    def resolve_header(self, candidate: str) -> Optional[str]:
+        idx = self.header_index(candidate)
+        return self.headers[idx] if idx is not None else None
+
+    def find_first_by(self, keys: Iterable[str], value: str) -> Optional[SheetRecord]:
+        if not value:
+            return None
+        for record in self.records:
+            for key in keys:
+                if normalize_header(key) not in {normalize_header(h) for h in self.headers}:
+                    continue
+                if str(record.get(key, "")).strip() == str(value).strip():
+                    return record
+        return None
+
+
+class GoogleSheetsClient:
+    """Wrapper around Google Sheets API operations used in the pipeline."""
+
+    def __init__(self, credentials, sheet_id: str):
+        self._logger = logging.getLogger(self.__class__.__name__)
+        self._service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
+        self._sheet_id = sheet_id
+
+    def fetch_table(self, tab_name: str) -> SheetTable:
+        self._logger.debug("Fetching sheet '%s'", tab_name)
+        request = (
+            self._service.spreadsheets()
+            .values()
+            .get(spreadsheetId=self._sheet_id, range=f"{tab_name}!A:ZZ")
+        )
+        response = request.execute()
+        values = response.get("values", [])
+        if not values:
+            raise RuntimeError(f"Sheet '{tab_name}' is empty or unreadable")
+        headers = values[0]
+        records = []
+        for offset, row in enumerate(values[1:], start=2):
+            data = {}
+            for idx, header in enumerate(headers):
+                data[header] = row[idx] if idx < len(row) else ""
+            records.append(SheetRecord(data=data, row_number=offset))
+        return SheetTable(name=tab_name, headers=headers, records=records)
+
+    def append_row(self, tab_name: str, values: List[Any]) -> None:
+        body = {"values": [values]}
+        self._service.spreadsheets().values().append(
+            spreadsheetId=self._sheet_id,
+            range=f"{tab_name}!A:ZZ",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body=body,
+        ).execute()
+
+    def batch_update_cells(
+        self,
+        table: SheetTable,
+        row_number: int,
+        updates: Dict[str, Any],
+    ) -> None:
+        data = []
+        for key, value in updates.items():
+            header = table.resolve_header(key)
+            if header is None:
+                continue
+            col_idx = table.headers.index(header) + 1
+            column_letter = column_index_to_letter(col_idx)
+            data.append(
+                {
+                    "range": f"{table.name}!{column_letter}{row_number}",
+                    "values": [[value]],
+                }
+            )
+        if not data:
+            return
+        body = {"valueInputOption": "USER_ENTERED", "data": data}
+        self._service.spreadsheets().values().batchUpdate(
+            spreadsheetId=self._sheet_id,
+            body=body,
+        ).execute()
+
+
+@dataclass
+class PipelineConfig:
+    """Configuration container loaded from environment and CLI."""
+
+    sheet_id: str
+    target_sheet: str
+    index_sheet: str
+    log_sheet: str
+    wp_url: str
+    wp_user: str
+    wp_app_password: str
+    serp_api_key: str
+    serp_engine: str
+    serp_location: str
+    openai_api_key: str
+    openai_model: str
+    max_posts: int
+    timezone: str = DEFAULT_TIMEZONE
+
+    @classmethod
+    def from_env(cls, args: argparse.Namespace) -> "PipelineConfig":
+        env = os.environ
+        max_posts = int(args.max_posts or env.get("MAX_POSTS_PER_RUN", "5"))
+        return cls(
+            sheet_id=env.get("SHEET_ID", ""),
+            target_sheet=env.get("TARGET_CONTENT_SHEET", "Sheet_Final"),
+            index_sheet=env.get("INDEX_SHEET", "indice_contenido"),
+            log_sheet=env.get("LOG_SHEET", "Logs_Optimización"),
+            wp_url=env.get("WP_URL", ""),
+            wp_user=env.get("WP_USER", ""),
+            wp_app_password=env.get("WP_APP_PASSWORD", ""),
+            serp_api_key=env.get("SERP_API_KEY", ""),
+            serp_engine=env.get("SERP_API_ENGINE", "google"),
+            serp_location=env.get("SERP_API_LOCATION", "Colombia"),
+            openai_api_key=env.get("OPENAI_API_KEY", ""),
+            openai_model=env.get("OPENAI_MODEL", "gpt-4.1"),
+            max_posts=max_posts,
+            timezone=env.get("PIPELINE_TIMEZONE", DEFAULT_TIMEZONE),
+        )
+
+    def validate(self) -> None:
+        missing = []
+        for field_name in (
+            "sheet_id",
+            "wp_url",
+            "wp_user",
+            "wp_app_password",
+            "serp_api_key",
+            "openai_api_key",
+        ):
+            if not getattr(self, field_name):
+                missing.append(field_name)
+        if missing:
+            raise ValueError(f"Missing mandatory configuration values: {', '.join(missing)}")
+
+
+class SerpClient:
+    """Simple wrapper for SerpAPI (or compatible) calls."""
+
+    def __init__(self, api_key: str, engine: str, location: str):
+        self._api_key = api_key
+        self._engine = engine
+        self._location = location
+        self._logger = logging.getLogger(self.__class__.__name__)
+
+    def fetch_snapshot(self, keyword: str) -> Dict[str, Any]:
+        if not keyword:
+            raise ValueError("SERP keyword is empty")
+        params = {
+            "engine": self._engine,
+            "q": keyword,
+            "location": self._location,
+            "api_key": self._api_key,
+            "google_domain": "google.com",
+            "hl": "es",
+        }
+        self._logger.debug("Requesting SERP snapshot for '%s'", keyword)
+        response = requests.get(SERP_API_ENDPOINT, params=params, timeout=30)
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"SERP API request failed ({response.status_code}): {response.text[:200]}"
+            )
+        return response.json()
+
+    @staticmethod
+    def format_snapshot(data: Dict[str, Any]) -> str:
+        blocks = []
+        paa_source = data.get("questions") or data.get("related_questions") or data.get("people_also_ask")
+        if paa := paa_source:
+            questions = [item.get("question", "") for item in paa if item.get("question")]
+            if questions:
+                blocks.append("People Also Ask:\n- " + "\n- ".join(questions[:10]))
+        if organic := data.get("organic_results"):
+            lines = []
+            for entry in organic[:10]:
+                title = entry.get("title", "")
+                url = entry.get("link", "")
+                snippet = entry.get("snippet", "")
+                lines.append(f"{title} | {url} | {snippet}")
+            if lines:
+                blocks.append("Top competitors:\n- " + "\n- ".join(lines))
+        if related := data.get("related_searches"):
+            terms = [item.get("query", "") for item in related if item.get("query")]
+            if terms:
+                blocks.append("Related searches: " + ", ".join(terms[:15]))
+        if snippet := data.get("answer_box") or data.get("featured_snippet"):
+            snippet_text = snippet.get("snippet") or snippet.get("answer") or ""
+            blocks.append(f"Featured snippet candidate: {snippet_text}")
+        if longtails := data.get("related_questions"):
+            longtail_terms = [item.get("question", "") for item in longtails if item.get("question")]
+            if longtail_terms:
+                blocks.append("Long-tail ideas: " + ", ".join(longtail_terms[:10]))
+        return "\n\n".join(blocks)
+
+
+class WordPressClient:
+    """Minimal WordPress REST API client."""
+
+    def __init__(self, base_url: str, user: str, app_password: str):
+        self._base_url = base_url.rstrip("/")
+        self._auth = (user, app_password)
+        self._logger = logging.getLogger(self.__class__.__name__)
+
+    def _request(self, method: str, path: str, **kwargs) -> Dict[str, Any]:
+        url = f"{self._base_url}/{path.lstrip('/')}"
+        response = requests.request(method, url, auth=self._auth, timeout=30, **kwargs)
+        if response.status_code >= 300:
+            raise RuntimeError(
+                f"WordPress API {method} {url} failed ({response.status_code}): {response.text[:200]}"
+            )
+        return response.json()
+
+    def fetch_post(self, post_id: Optional[int], url: Optional[str]) -> Dict[str, Any]:
+        if post_id:
+            return self._request("GET", f"wp-json/wp/v2/posts/{post_id}")
+        if not url:
+            raise ValueError("Post requires either ID or URL")
+        slug = url.rstrip("/").split("/")[-1]
+        query = self._request("GET", "wp-json/wp/v2/posts", params={"slug": slug})
+        if not query:
+            raise RuntimeError(f"No WordPress post found for slug '{slug}'")
+        return query[0]
+
+    def update_post(self, post_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+        self._logger.debug("Updating WordPress post %s", post_id)
+        return self._request("POST", f"wp-json/wp/v2/posts/{post_id}", json=payload)
+
+
+class OpenAIClient:
+    """Thin wrapper around OpenAI responses API."""
+
+    def __init__(self, api_key: str, model: str, prompt_template: Template):
+        self._client = OpenAI(api_key=api_key)
+        self._model = model
+        self._template = prompt_template
+        self._logger = logging.getLogger(self.__class__.__name__)
+
+    def generate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        prompt = self._template.substitute(payload)
+        self._logger.debug("Sending prompt to OpenAI (%d chars)", len(prompt))
+        response = self._client.responses.create(
+            model=self._model,
+            input=prompt,
+            temperature=0.4,
+            max_output_tokens=4000,
+        )
+        text_chunks: List[str] = []
+        for item in getattr(response, "output", []):
+            for content in getattr(item, "content", []):
+                if getattr(content, "type", "") == "output_text":
+                    text_chunks.append(getattr(content, "text", ""))
+        if not text_chunks and hasattr(response, "output_text"):
+            text_chunks.append(getattr(response, "output_text", ""))
+        raw_text = "".join(text_chunks).strip()
+        if not raw_text:
+            raise RuntimeError("OpenAI returned an empty response")
+        return json.loads(raw_text)
+
+
+def parse_date(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        dt = date_parser.parse(value)
+        if not dt.tzinfo:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
+def count_words(html: str) -> int:
+    text = re.sub(r"<[^>]+>", " ", html or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    return len(text.split()) if text else 0
+
+
+def load_prompt(path: str) -> Template:
+    with open(path, "r", encoding="utf-8") as fh:
+        content = fh.read()
+    return Template(content)
+
+
+def format_sheet_slice(records: List[SheetRecord], limit: Optional[int] = None) -> str:
+    lines = []
+    for record in records[: limit or len(records)]:
+        parts = [f"{key}: {value}" for key, value in record.data.items() if value]
+        lines.append(" | ".join(parts))
+    return "\n".join(lines)
+
+
+def ensure_prompt_payload(
+    record: SheetRecord,
+    index_table: SheetTable,
+    index_record: Optional[SheetRecord],
+    serp_snapshot: Dict[str, Any],
+    post_payload: Dict[str, Any],
+    sheet_recommendations: SheetRecord,
+    config: PipelineConfig,
+) -> Dict[str, Any]:
+    primary_keyword = (
+        record.get("Keyword_Principal")
+        or record.get("Keyword", "")
+        or (index_record.get("Keyword_Principal") if index_record else "")
+    )
+    secondary_keywords = (
+        sheet_recommendations.get("Keywords_Secundarias")
+        or sheet_recommendations.get("Keywords Secundarias")
+        or index_record.get("Keywords_Secundarias") if index_record else ""
+    )
+    formatted_index = format_sheet_slice(index_table.records, limit=200)
+    formatted_serp = SerpClient.format_snapshot(serp_snapshot)
+    payload = {
+        "post_url": record.get("URL") or post_payload.get("link", ""),
+        "primary_keyword": primary_keyword,
+        "secondary_keywords": secondary_keywords,
+        "current_content": post_payload.get("content", {}).get("rendered", ""),
+        "sheet_recommendations": json.dumps(sheet_recommendations.data, ensure_ascii=False, indent=2),
+        "index_context": formatted_index,
+        "serp_overview": formatted_serp,
+        "traffic_notes": sheet_recommendations.get("Variacion_Trafico")
+        or sheet_recommendations.get("Variacion Trafico", ""),
+        "serp_location": config.serp_location,
+    }
+    return payload
+
+
+def prepare_wp_update(payload: Dict[str, Any]) -> Dict[str, Any]:
+    content_html = payload["content_html"]
+    h1 = payload.get("h1")
+    if h1 and not content_html.strip().lower().startswith("<h1"):
+        content_html = f"<h1>{h1}</h1>\n" + content_html
+    meta_fields = {
+        "yoast_wpseo_title": payload.get("seo_title", ""),
+        "yoast_wpseo_metadesc": payload.get("meta_description", ""),
+    }
+    return {
+        "title": payload.get("seo_title", ""),
+        "content": content_html,
+        "excerpt": payload.get("excerpt_200", ""),
+        "meta": meta_fields,
+    }
+
+
+def log_to_sheet(
+    sheets: GoogleSheetsClient,
+    config: PipelineConfig,
+    record: SheetRecord,
+    optimized: Dict[str, Any],
+    before_words: int,
+    after_words: int,
+) -> None:
+    now = datetime.now(ZoneInfo(config.timezone)).strftime("%Y-%m-%d %H:%M:%S")
+    log_row = [
+        now,
+        record.get("URL"),
+        optimized.get("primary_keyword", record.get("Keyword_Principal", "")),
+        ", ".join(optimized.get("mejoras_aplicadas", [])),
+        before_words,
+        after_words,
+        optimized.get("serp_snippet_detected", ""),
+        optimized.get("ia_score", ""),
+    ]
+    sheets.append_row(config.log_sheet, log_row)
+
+
+def update_sheet_rows(
+    sheets: GoogleSheetsClient,
+    config: PipelineConfig,
+    content_table: SheetTable,
+    index_table: SheetTable,
+    content_record: SheetRecord,
+    index_record: Optional[SheetRecord],
+    optimized: Dict[str, Any],
+) -> None:
+    today = datetime.now(ZoneInfo(config.timezone)).strftime("%Y-%m-%d")
+    sheet_updates = {
+        "Ultima_Optimización": today,
+        "Keyword_Principal": optimized.get("primary_keyword", content_record.get("Keyword_Principal", "")),
+    }
+    sheets.batch_update_cells(content_table, content_record.row_number, sheet_updates)
+    if not index_record:
+        return
+    index_updates = {
+        "Extracto_200": optimized.get("excerpt_200", ""),
+        "H2_H3": " | ".join(optimized.get("h2_h3_outline", [])),
+        "Keyword_Principal": optimized.get("primary_keyword", ""),
+        "Keywords_Secundarias": ", ".join(optimized.get("secondary_keywords", [])),
+        "Fecha_Actualizacion": today,
+        "Score_IA": optimized.get("ia_score", ""),
+    }
+    sheets.batch_update_cells(index_table, index_record.row_number, index_updates)
+
+
+def should_process(record: SheetRecord, days_threshold: int = 30) -> bool:
+    if str(record.get("Ejecutar_Accion", "")).strip().upper() != "SI":
+        return False
+    last_opt = parse_date(record.get("Ultima_Optimización") or record.get("Ultima Optimización"))
+    if not last_opt:
+        return True
+    delta = datetime.now(timezone.utc) - last_opt
+    return delta >= timedelta(days=days_threshold)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Automate SEO optimization pipeline")
+    parser.add_argument("--prompt-file", required=True, help="Path to the prompt template file")
+    parser.add_argument("--max-posts", type=int, default=None, help="Maximum posts to process in a run")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    args = parser.parse_args(argv)
+
+    configure_logging(args.verbose)
+    logger = logging.getLogger("pipeline")
+
+    config = PipelineConfig.from_env(args)
+    try:
+        config.validate()
+    except ValueError as exc:
+        logger.error(str(exc))
+        return 1
+
+    credentials = load_service_account_credentials(os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", ""))
+    sheets = GoogleSheetsClient(credentials, config.sheet_id)
+    serp_client = SerpClient(config.serp_api_key, config.serp_engine, config.serp_location)
+    prompt_template = load_prompt(args.prompt_file)
+    ai_client = OpenAIClient(config.openai_api_key, config.openai_model, prompt_template)
+    wp_client = WordPressClient(config.wp_url, config.wp_user, config.wp_app_password)
+
+    try:
+        content_table = sheets.fetch_table(config.target_sheet)
+        index_table = sheets.fetch_table(config.index_sheet)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.exception("Failed to load Google Sheets data: %s", exc)
+        return 1
+
+    processed_posts = 0
+    skipped: List[str] = []
+    seen_posts: set[str] = set()
+
+    index_by_id = {
+        str(rec.get("Post_ID")).strip(): rec
+        for rec in index_table.records
+        if rec.get("Post_ID")
+    }
+    index_by_url = {
+        rec.get("URL"): rec
+        for rec in index_table.records
+        if rec.get("URL")
+    }
+
+    for record in content_table.records:
+        if processed_posts >= config.max_posts:
+            break
+        if not should_process(record):
+            continue
+        post_id_raw = record.get("Post_ID") or record.get("ID")
+        post_url = record.get("URL") or record.get("Enlace")
+        post_id: Optional[int] = None
+        if post_id_raw:
+            try:
+                post_id = int(str(post_id_raw).strip())
+            except ValueError:
+                logger.warning("Invalid Post_ID '%s' for URL %s", post_id_raw, post_url)
+        post_key = str(post_id) if post_id else (post_url or "")
+        if post_key and post_key in seen_posts:
+            logger.debug("Skipping duplicated entry for %s", post_key)
+            continue
+        index_record = None
+        if post_id:
+            index_record = index_by_id.get(str(post_id))
+        if not index_record and post_url:
+            index_record = index_by_url.get(post_url)
+        try:
+            wp_post = wp_client.fetch_post(post_id, post_url)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error("Skipping post (cannot fetch WP content): %s", exc)
+            skipped.append(post_url or str(post_id))
+            continue
+        try:
+            primary_keyword = (
+                record.get("Keyword_Principal")
+                or (index_record.get("Keyword_Principal") if index_record else "")
+            )
+            serp_snapshot = serp_client.fetch_snapshot(primary_keyword or record.get("Titulo", ""))
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error("Skipping post (SERP lookup failed): %s", exc)
+            skipped.append(post_url or str(post_id))
+            continue
+        try:
+            payload = ensure_prompt_payload(
+                record,
+                index_table,
+                index_record,
+                serp_snapshot,
+                wp_post,
+                record,
+                config,
+            )
+            optimized = ai_client.generate(payload)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error("Skipping post (OpenAI failure): %s", exc)
+            skipped.append(post_url or str(post_id))
+            continue
+        try:
+            before_words = count_words(wp_post.get("content", {}).get("rendered", ""))
+            after_words = count_words(optimized.get("content_html", ""))
+            update_payload = prepare_wp_update({**optimized, "primary_keyword": payload["primary_keyword"]})
+            wp_client.update_post(wp_post["id"], update_payload)
+            log_to_sheet(sheets, config, record, {**optimized, "primary_keyword": payload["primary_keyword"]}, before_words, after_words)
+            update_sheet_rows(sheets, config, content_table, index_table, record, index_record, {**optimized, "primary_keyword": payload["primary_keyword"]})
+            processed_posts += 1
+            if post_key:
+                seen_posts.add(post_key)
+            logger.info("Optimized post %s", post_url or wp_post.get("id"))
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error("Failed to update post or sheets: %s", exc)
+            skipped.append(post_url or str(post_id))
+
+    logger.info("Run complete: %d posts optimized, %d skipped", processed_posts, len(skipped))
+    if skipped:
+        logger.info("Skipped items: %s", ", ".join(skipped))
+    return 0 if processed_posts > 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
