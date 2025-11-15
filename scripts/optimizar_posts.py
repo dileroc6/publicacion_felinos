@@ -55,6 +55,11 @@ def normalize_header(header: str) -> str:
     return re.sub(r"[^0-9a-z]+", "", header.lower())
 
 
+def normalize_sheet_title(title: str) -> str:
+    """Normalize sheet titles ignoring spaces, underscores and case."""
+    return re.sub(r"[^0-9a-z]+", "", title.lower())
+
+
 def column_index_to_letter(idx: int) -> str:
     """Convert a 1-based column index to spreadsheet column letters."""
     result = ""
@@ -112,15 +117,46 @@ class GoogleSheetsClient:
         self._service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
         self._sheet_id = sheet_id
 
+    def _list_sheet_titles(self) -> List[str]:
+        metadata = self._service.spreadsheets().get(
+            spreadsheetId=self._sheet_id, fields="sheets.properties.title"
+        ).execute()
+        return [sheet["properties"]["title"] for sheet in metadata.get("sheets", [])]
+
+    def _resolve_tab_name(self, tab_name: str) -> str:
+        titles = self._list_sheet_titles()
+        if tab_name in titles:
+            return tab_name
+        normalized_target = normalize_sheet_title(tab_name)
+        for title in titles:
+            if normalize_sheet_title(title) == normalized_target:
+                self._logger.info("Renombrando referencia de hoja '%s' a '%s' detectada en el documento", tab_name, title)
+                return title
+        available = ", ".join(titles) if titles else "(sin pestañas detectadas)"
+        raise RuntimeError(
+            f"No se encontró la pestaña '{tab_name}' en el Google Sheet. Disponibles: {available}. "
+            "Actualiza TARGET_CONTENT_SHEET/INDEX_SHEET/LOG_SHEET o corrige el nombre en la hoja."
+        )
+
     def fetch_table(self, tab_name: str) -> SheetTable:
         self._logger.debug("Fetching sheet '%s'", tab_name)
-        safe_name = tab_name if " " not in tab_name else f"'{tab_name}'"
+        has_range = "!" in tab_name
+        sheet_name = tab_name.split("!")[0]
+        resolved_name = self._resolve_tab_name(sheet_name)
+        # Siempre encapsulamos el nombre de la pestaña en comillas simples para evitar errores con espacios o caracteres especiales
+        quoted_name = resolved_name if resolved_name.startswith("'") else f"'{resolved_name}'"
+        range_ref = tab_name if has_range else f"{quoted_name}!A1:ZZ"
         request = (
             self._service.spreadsheets()
             .values()
-            .get(spreadsheetId=self._sheet_id, range=safe_name)
+            .get(spreadsheetId=self._sheet_id, range=range_ref)
         )
-        response = request.execute()
+        try:
+            response = request.execute()
+        except Exception as exc:  # pylint: disable=broad-except
+            raise RuntimeError(
+                f"No se pudo leer la pestaña '{resolved_name}'. Verifica permisos de la cuenta de servicio o el rango solicitado"
+            ) from exc
         values = response.get("values", [])
         if not values:
             raise RuntimeError(f"Sheet '{tab_name}' is empty or unreadable")
