@@ -41,7 +41,9 @@ jobs:
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
           SERP_API_KEY: ${{ secrets.SERP_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PYTHONUNBUFFERED: "1"
         run: |
           python scripts/optimizar_posts.py \
             --prompt-file prompts/optimizar_post.txt \
-            --max-posts ${MAX_POSTS_PER_RUN:-5}
+            --max-posts ${MAX_POSTS_PER_RUN:-5} \
+            --verbose

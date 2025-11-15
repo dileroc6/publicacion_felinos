@@ -557,6 +557,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if post_key and post_key in seen_posts:
             logger.debug("Skipping duplicated entry for %s", post_key)
             continue
+        logger.info("Procesando post objetivo: URL=%s, ID=%s", post_url or "desconocida", post_id or "N/A")
         index_record = None
         if post_id:
             index_record = index_by_id.get(str(post_id))
@@ -573,7 +574,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 record.get("Keyword_Principal")
                 or (index_record.get("Keyword_Principal") if index_record else "")
             )
-            serp_snapshot = serp_client.fetch_snapshot(primary_keyword or record.get("Titulo", ""))
+            consulta_serp = primary_keyword or record.get("Titulo", "")
+            logger.info("Consultando SERP para la keyword: %s", consulta_serp)
+            serp_snapshot = serp_client.fetch_snapshot(consulta_serp)
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("Skipping post (SERP lookup failed): %s", exc)
             skipped.append(post_url or str(post_id))
@@ -588,6 +591,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 record,
                 config,
             )
+            logger.info("Enviando prompt a OpenAI (%d caracteres)", len(prompt_template.substitute(payload)))
             optimized = ai_client.generate(payload)
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("Skipping post (OpenAI failure): %s", exc)
@@ -596,6 +600,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             before_words = count_words(wp_post.get("content", {}).get("rendered", ""))
             after_words = count_words(optimized.get("content_html", ""))
+            logger.info("Actualizando WordPress: antes=%d palabras, después=%d", before_words, after_words)
             update_payload = prepare_wp_update({**optimized, "primary_keyword": payload["primary_keyword"]})
             wp_client.update_post(wp_post["id"], update_payload)
             log_to_sheet(sheets, config, record, {**optimized, "primary_keyword": payload["primary_keyword"]}, before_words, after_words)
