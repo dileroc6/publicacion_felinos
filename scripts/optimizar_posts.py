@@ -575,6 +575,11 @@ class OpenAIClient:
         self._use_responses = hasattr(self._client, "responses") and hasattr(
             self._client.responses, "create"
         )
+        self._http_responses_enabled = os.environ.get("OPENAI_HTTP_RESPONSES", "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
         self._response_format = {
             "type": "json_schema",
             "json_schema": AI_RESPONSE_SCHEMA,
@@ -741,9 +746,13 @@ class OpenAIClient:
                 return result
             raise RuntimeError("OpenAI response did not include JSON content")
 
-        direct = self._call_responses_endpoint(prompt)
-        if direct is not None:
-            return direct
+        if self._http_responses_enabled:
+            direct = self._call_responses_endpoint(prompt)
+            if direct is not None:
+                return direct
+            self._logger.info(
+                "Falling back to chat.completions after responses HTTP attempt"
+            )
 
         chat = self._client.chat.completions.create(
             model=self._model,
