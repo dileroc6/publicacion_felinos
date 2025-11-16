@@ -110,13 +110,14 @@ def parse_json_blob(raw_text: str) -> Dict[str, Any]:
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            text = text.replace("\n", "\\n")
-            text = text.replace("\r", "\\r")
-            text = text.replace("\t", "\\t")
+            text = text.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+            # Escape unescaped double quotes that might appear inside HTML attributes
+            text = text.replace('"<', '\\"<').replace('>"', '>\\"')
             try:
                 return json.loads(text)
             except json.JSONDecodeError:
-                text = text.replace("\"", "\\\"")
+                # Last resort: wrap interior double quotes
+                text = re.sub(r'(?<!\\)"', '\\"', text)
                 try:
                     return json.loads(text)
                 except json.JSONDecodeError:
