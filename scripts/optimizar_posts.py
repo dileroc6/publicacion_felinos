@@ -110,10 +110,17 @@ def parse_json_blob(raw_text: str) -> Dict[str, Any]:
         try:
             return json.loads(text)
         except json.JSONDecodeError:
+            text = text.replace("\n", "\\n")
+            text = text.replace("\r", "\\r")
+            text = text.replace("\t", "\\t")
             try:
-                return json.loads(text, strict=False)
+                return json.loads(text)
             except json.JSONDecodeError:
-                return None
+                text = text.replace("\"", "\\\"")
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    return None
 
     result = _try_load(cleaned)
     if result is not None:
