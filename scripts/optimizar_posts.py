@@ -172,6 +172,10 @@ def parse_json_blob(raw_text: str) -> Dict[str, Any]:
         if cleaned.lower().startswith("json"):
             cleaned = cleaned[4:]
         cleaned = cleaned.strip()
+    # Remove common emphasis markers or decorative separators the model may prepend/append
+    cleaned = cleaned.lstrip("\ufeff")
+    cleaned = re.sub(r"^\s*(?:\*{3,}|-{3,})\s*", "", cleaned)
+    cleaned = re.sub(r"\s*(?:\*{3,}|-{3,})\s*$", "", cleaned)
     cleaned = cleaned.lstrip("* \n\r\t")
     cleaned = cleaned.rstrip("* \n\r\t")
     logger = logging.getLogger("OpenAIParser")
@@ -196,6 +200,16 @@ def parse_json_blob(raw_text: str) -> Dict[str, Any]:
     result = _try_load(cleaned)
     if result is not None:
         return result
+
+    # Some models may emit only key/value lines without outer braces
+    stripped = cleaned.lstrip()
+    if stripped.startswith('"') and "{" not in stripped and "}" not in stripped:
+        wrapped = "{\n" + stripped
+        if not wrapped.rstrip().endswith("}"):
+            wrapped = wrapped.rstrip(", \n\r\t") + "\n}"
+        result = _try_load(wrapped)
+        if result is not None:
+            return result
 
     start = cleaned.find("{")
     end = cleaned.rfind("}")
