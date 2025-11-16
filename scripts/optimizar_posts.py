@@ -670,21 +670,11 @@ class OpenAIClient:
             "input": [
                 {
                     "role": "system",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Eres un estratega SEO que responde únicamente con JSON válido.",
-                        }
-                    ],
+                    "content": "Eres un estratega SEO que responde únicamente con JSON válido.",
                 },
                 {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        }
-                    ],
+                    "content": prompt,
                 },
             ],
             "temperature": 0.4,
