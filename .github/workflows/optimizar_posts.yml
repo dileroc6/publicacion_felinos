@@ -14,7 +14,7 @@ jobs:
       SHEET_ID: 1Hwues5snSJFqJRTzEXFmts3N3OpO0Tgpejub_nosl40
       TARGET_CONTENT_SHEET: Sheet_Final
       INDEX_SHEET: indice_contenido
-      LOG_SHEET: Logs_Optimización
+      LOG_SHEET: logs_optimizacion
       SERP_API_ENGINE: google
       SERP_API_LOCATION: Colombia
       OPENAI_MODEL: gpt-4.1

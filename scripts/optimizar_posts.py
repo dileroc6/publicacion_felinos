@@ -185,10 +185,12 @@ class GoogleSheetsClient:
         return SheetTable(name=tab_name, headers=headers, records=records)
 
     def append_row(self, tab_name: str, values: List[Any]) -> None:
+        resolved_name = self._resolve_tab_name(tab_name)
+        quoted_name = resolved_name if resolved_name.startswith("'") else f"'{resolved_name}'"
         body = {"values": [values]}
         self._service.spreadsheets().values().append(
             spreadsheetId=self._sheet_id,
-            range=f"{tab_name}!A:ZZ",
+            range=f"{quoted_name}!A:ZZ",
             valueInputOption="USER_ENTERED",
             insertDataOption="INSERT_ROWS",
             body=body,
