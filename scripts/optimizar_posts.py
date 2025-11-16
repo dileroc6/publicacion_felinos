@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 DEFAULT_TIMEZONE = "America/Bogota"
 SERP_API_ENDPOINT = "https://serpapi.com/search.json"
+OPENAI_RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses"
 MAX_PROMPT_CURRENT_CONTENT_CHARS = 12000
 MAX_PROMPT_INDEX_ROWS = 40
 MAX_PROMPT_SERP_LINES = 5
@@ -521,6 +522,7 @@ class OpenAIClient:
 
     def __init__(self, api_key: str, model: str, prompt_template: Template):
         self._client = OpenAI(api_key=api_key)
+        self._api_key = api_key
         self._model = model
         self._template = prompt_template
         self._logger = logging.getLogger(self.__class__.__name__)
@@ -535,6 +537,59 @@ class OpenAIClient:
             raise RuntimeError(
                 "El SDK de OpenAI instalado no expone ni 'responses' ni 'chat.completions'. Actualiza la dependencia."
             )
+
+    def _call_responses_endpoint(self, prompt: str) -> Optional[Dict[str, Any]]:
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self._model,
+            "input": prompt,
+            "temperature": 0.4,
+            "max_output_tokens": 4000,
+            "response_format": self._response_format,
+        }
+        try:
+            response = requests.post(
+                OPENAI_RESPONSES_ENDPOINT,
+                headers=headers,
+                json=payload,
+                timeout=90,
+            )
+        except requests.RequestException as exc:  # pylint: disable=broad-except
+            self._logger.warning("Fallo al invocar OpenAI /responses: %s", exc)
+            return None
+        if response.status_code >= 300:
+            self._logger.warning(
+                "OpenAI /responses devolvió %s: %s",
+                response.status_code,
+                response.text[:200],
+            )
+            return None
+        try:
+            data = response.json()
+        except ValueError:
+            self._logger.warning("OpenAI /responses envió un cuerpo no JSON")
+            return None
+        output = data.get("output") or []
+        for item in output:
+            for content in item.get("content", []):
+                if content.get("type") == "output_json" and "json" in content:
+                    return content["json"]
+                if content.get("type") == "output_text" and content.get("text"):
+                    return parse_json_blob(content["text"])
+        if isinstance(data.get("response"), dict):
+            response_payload = data["response"]
+            if isinstance(response_payload.get("output"), list):
+                for item in response_payload.get("output", []):
+                    if item.get("type") == "output_json" and "json" in item:
+                        return item["json"]
+                    if item.get("type") == "output_text" and item.get("text"):
+                        return parse_json_blob(item["text"])
+        if data.get("output_text"):
+            return parse_json_blob(data["output_text"])
+        return None
 
     def generate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         prompt = self._template.substitute(payload)
@@ -563,6 +618,9 @@ class OpenAIClient:
                     return parse_json_blob(text)
             raise RuntimeError("OpenAI response did not include JSON content")
         else:
+            direct = self._call_responses_endpoint(prompt)
+            if direct is not None:
+                return direct
             chat = self._client.chat.completions.create(
                 model=self._model,
                 messages=[
