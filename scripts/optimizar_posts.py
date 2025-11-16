@@ -104,15 +104,32 @@ def parse_json_blob(raw_text: str) -> Dict[str, Any]:
         if cleaned.lower().startswith("json"):
             cleaned = cleaned[4:]
         cleaned = cleaned.strip()
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            segment = cleaned[start : end + 1]
-            return json.loads(segment)
-        raise
+    logger = logging.getLogger("OpenAIParser")
+
+    def _try_load(text: str) -> Optional[Dict[str, Any]]:
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            try:
+                return json.loads(text, strict=False)
+            except json.JSONDecodeError:
+                return None
+
+    result = _try_load(cleaned)
+    if result is not None:
+        return result
+
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        segment = cleaned[start : end + 1]
+        result = _try_load(segment)
+        if result is not None:
+            return result
+        logger.debug("Raw OpenAI payload (truncated): %s", segment[:4000])
+    else:
+        logger.debug("Raw OpenAI payload (truncated): %s", cleaned[:4000])
+    raise ValueError("Unable to parse OpenAI JSON payload")
 
 
 @dataclass
