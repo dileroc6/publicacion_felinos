@@ -11,6 +11,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from string import Template
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import requests
@@ -259,6 +260,15 @@ def parse_json_blob(raw_text: str) -> Dict[str, Any]:
     else:
         logger.error("OpenAI response parse error. Snippet: %s", cleaned[:1000])
     logger.error("OpenAI response parse error (raw): %s", cleaned[:1000])
+    try:
+        dump_dir = Path.cwd() / "openai_failures"
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
+        dump_file = dump_dir / f"failure_{timestamp}.txt"
+        dump_file.write_text(cleaned, encoding="utf-8")
+        logger.error("OpenAI response dump saved to %s", dump_file)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.error("Unable to persist OpenAI failure dump: %s", exc)
     raise ValueError("Unable to parse OpenAI JSON payload")
 
 
