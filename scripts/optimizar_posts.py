@@ -584,6 +584,82 @@ class OpenAIClient:
                 "El SDK de OpenAI instalado no expone ni 'responses' ni 'chat.completions'. Actualiza la dependencia."
             )
 
+    @staticmethod
+    def _normalize(value: Any) -> Any:
+        if isinstance(value, (str, dict, list, int, float, bool)) or value is None:
+            return value
+        if hasattr(value, "model_dump"):
+            try:
+                return value.model_dump()
+            except Exception:  # pylint: disable=broad-except
+                pass
+        if hasattr(value, "to_dict"):
+            try:
+                return value.to_dict()
+            except Exception:  # pylint: disable=broad-except
+                pass
+        if hasattr(value, "__iter__") and not isinstance(value, (str, bytes)):
+            try:
+                return [OpenAIClient._normalize(item) for item in value]
+            except TypeError:
+                pass
+        if hasattr(value, "__dict__"):
+            try:
+                return {
+                    key: OpenAIClient._normalize(val)
+                    for key, val in value.__dict__.items()
+                    if not key.startswith("_")
+                }
+            except Exception:  # pylint: disable=broad-except
+                pass
+        return value
+
+    def _extract_first_json(self, payload: Any) -> Optional[Dict[str, Any]]:
+        obj = self._normalize(payload)
+        last_error: Optional[Exception] = None
+        if isinstance(obj, dict):
+            if isinstance(obj.get("json"), dict):
+                return obj["json"]
+            if isinstance(obj.get("output_json"), dict):
+                return obj["output_json"]
+            if isinstance(obj.get("content"), dict):
+                try:
+                    result = self._extract_first_json(obj["content"])
+                    if result is not None:
+                        return result
+                except ValueError as exc:
+                    last_error = exc
+            if isinstance(obj.get("text"), str):
+                return parse_json_blob(obj["text"])
+            if isinstance(obj.get("output_text"), str):
+                return parse_json_blob(obj["output_text"])
+            for value in obj.values():
+                try:
+                    result = self._extract_first_json(value)
+                    if result is not None:
+                        return result
+                except ValueError as exc:  # propagate last parsing error if nothing succeeds
+                    last_error = exc
+                    continue
+            if last_error:
+                raise last_error
+            return None
+        if isinstance(obj, list):
+            for item in obj:
+                try:
+                    result = self._extract_first_json(item)
+                    if result is not None:
+                        return result
+                except ValueError as exc:
+                    last_error = exc
+                    continue
+            if last_error:
+                raise last_error
+            return None
+        if isinstance(obj, str):
+            return parse_json_blob(obj)
+        return None
+
     def _call_responses_endpoint(self, prompt: str) -> Optional[Dict[str, Any]]:
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -594,15 +670,29 @@ class OpenAIClient:
             "input": [
                 {
                     "role": "system",
-                    "content": "Devuelve únicamente JSON válido que siga el esquema requerido.",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Eres un estratega SEO que responde únicamente con JSON válido.",
+                        }
+                    ],
                 },
                 {
                     "role": "user",
-                    "content": prompt,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt,
+                        }
+                    ],
                 },
             ],
             "temperature": 0.4,
             "max_output_tokens": 4000,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": AI_RESPONSE_SCHEMA,
+            },
         }
         try:
             response = requests.post(
@@ -626,81 +716,83 @@ class OpenAIClient:
         except ValueError:
             self._logger.warning("OpenAI /responses envió un cuerpo no JSON")
             return None
-        text_variants = []
-        if "output" in data:
-            text_variants.extend(
-                item.get("text")
-                for item in data.get("output", [])
-                if isinstance(item, dict)
-                and item.get("type") == "output_text"
-                and item.get("text")
-            )
-        response_section = data.get("response")
-        if isinstance(response_section, dict):
-            text_variants.extend(
-                item.get("text")
-                for item in response_section.get("output", [])
-                if isinstance(item, dict)
-                and item.get("type") == "output_text"
-                and item.get("text")
-            )
-        if data.get("output_text"):
-            text_variants.append(data["output_text"])
+        try:
+            return self._extract_first_json(data)
+        except ValueError:
+            return None
 
-        for text in text_variants:
-            try:
-                return parse_json_blob(text)
-            except ValueError:
-                continue
-        return None
-
-    def generate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        prompt = self._template.substitute(payload)
+    def _invoke_prompt(self, prompt: str) -> Dict[str, Any]:
         self._logger.debug("Sending prompt to OpenAI (%d chars)", len(prompt))
         if self._use_responses:
             response = self._client.responses.create(
                 model=self._model,
-                input=prompt,
-                temperature=0.4,
-                max_output_tokens=4000,
-                response_format=self._response_format,
-            )
-            for item in getattr(response, "output", []):
-                for content in getattr(item, "content", []):
-                    if hasattr(content, "json") and content.json is not None:  # type: ignore[attr-defined]
-                        return content.json  # type: ignore[attr-defined]
-                    text = getattr(content, "text", "")
-                        
-                    if isinstance(text, str) and text.strip():
-                        return parse_json_blob(text)
-            if hasattr(response, "output_json"):
-                return getattr(response, "output_json")
-            if hasattr(response, "output_text"):
-                text = getattr(response, "output_text", "")
-                if text:
-                    return parse_json_blob(text)
-            raise RuntimeError("OpenAI response did not include JSON content")
-        else:
-            direct = self._call_responses_endpoint(prompt)
-            if direct is not None:
-                return direct
-            chat = self._client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": "Eres un estratega SEO y copywriter senior."},
-                    {"role": "user", "content": prompt},
+                input=[
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Eres un estratega SEO que responde únicamente con JSON válido.",
+                            }
+                        ],
+                    },
+                    {"role": "user", "content": [{"type": "text", "text": prompt}]},
                 ],
                 temperature=0.4,
-                max_tokens=4000,
-                response_format=self._response_format,
+                max_output_tokens=4000,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": AI_RESPONSE_SCHEMA,
+                },
             )
-            if chat.choices:
-                message = chat.choices[0].message
-                if hasattr(message, "parsed") and message.parsed is not None:
-                    return message.parsed  # type: ignore[arg-type]
-                if message.content:
-                    return parse_json_blob(message.content)
+            result = self._extract_first_json(response)
+            if result is not None:
+                return result
+            raise RuntimeError("OpenAI response did not include JSON content")
+
+        direct = self._call_responses_endpoint(prompt)
+        if direct is not None:
+            return direct
+
+        chat = self._client.chat.completions.create(
+            model=self._model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Eres un estratega SEO y copywriter senior. Responde únicamente con JSON válido conforme al esquema dado.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.4,
+            max_tokens=4000,
+            response_format=self._response_format,
+        )
+        if chat.choices:
+            message = chat.choices[0].message
+            result = self._extract_first_json(message)
+            if result is not None:
+                return result
         raise RuntimeError("OpenAI returned an empty response")
+
+    def generate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        prompt_base = self._template.substitute(payload)
+        attempts = [
+            prompt_base,
+            f"{prompt_base}\n\nIMPORTANTE: Repite únicamente el objeto JSON válido y nada más.",
+            f"{prompt_base}\n\nDEVUELVE SOLO EL JSON SOLICITADO. No añadas comentarios ni marcadores.",
+        ]
+        last_error: Optional[Exception] = None
+        for attempt_index, prompt in enumerate(attempts, start=1):
+            try:
+                return self._invoke_prompt(prompt)
+            except (ValueError, RuntimeError) as exc:
+                last_error = exc
+                self._logger.warning(
+                    "OpenAI attempt %d failed: %s", attempt_index, exc
+                )
+        if isinstance(last_error, ValueError):
+            raise last_error
+        raise RuntimeError("OpenAI no devolvió una respuesta utilizable tras múltiples intentos")
 
 
 def parse_date(value: str) -> Optional[datetime]:
