@@ -665,7 +665,7 @@ class OpenAIClient:
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        request_payload = {
+        request_payload: Dict[str, Any] = {
             "model": self._model,
             "input": [
                 {
@@ -689,10 +689,11 @@ class OpenAIClient:
             ],
             "temperature": 0.4,
             "max_output_tokens": 4000,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": AI_RESPONSE_SCHEMA,
-            },
+        }
+        # Algunos despliegues requieren schema vía text.format
+        request_payload["text"] = {
+            "format": "json_schema",
+            "json_schema": AI_RESPONSE_SCHEMA,
         }
         try:
             response = requests.post(
