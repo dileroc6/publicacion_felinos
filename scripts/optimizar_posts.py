@@ -126,9 +126,10 @@ def parse_json_blob(raw_text: str) -> Dict[str, Any]:
         result = _try_load(segment)
         if result is not None:
             return result
-        logger.debug("Raw OpenAI payload (truncated): %s", segment[:4000])
+        logger.error("OpenAI response parse error. Snippet: %s", segment[:1000])
     else:
-        logger.debug("Raw OpenAI payload (truncated): %s", cleaned[:4000])
+        logger.error("OpenAI response parse error. Snippet: %s", cleaned[:1000])
+    logger.error("OpenAI response parse error (raw): %s", cleaned[:1000])
     raise ValueError("Unable to parse OpenAI JSON payload")
 
 
