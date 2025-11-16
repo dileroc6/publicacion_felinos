@@ -591,7 +591,7 @@ class OpenAIClient:
             "max_output_tokens": 4000,
             "text": {
                 "format": "json_schema",
-                "schema": AI_RESPONSE_SCHEMA,
+                "json_schema": AI_RESPONSE_SCHEMA,
             },
         }
         try:
