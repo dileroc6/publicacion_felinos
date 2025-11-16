@@ -579,26 +579,26 @@ class OpenAIClient:
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        payload = {
+        request_payload = {
             "model": self._model,
             "input": [
                 {
+                    "role": "system",
+                    "content": "Devuelve únicamente JSON válido que siga el esquema requerido.",
+                },
+                {
                     "role": "user",
                     "content": prompt,
-                }
+                },
             ],
             "temperature": 0.4,
             "max_output_tokens": 4000,
-            "text": {
-                "format": "json_schema",
-                "schema": AI_RESPONSE_SCHEMA,
-            },
         }
         try:
             response = requests.post(
                 OPENAI_RESPONSES_ENDPOINT,
                 headers=headers,
-                json=payload,
+                json=request_payload,
                 timeout=90,
             )
         except requests.RequestException as exc:  # pylint: disable=broad-except
@@ -616,16 +616,32 @@ class OpenAIClient:
         except ValueError:
             self._logger.warning("OpenAI /responses envió un cuerpo no JSON")
             return None
+        text_variants = []
         if "output" in data:
-            for item in data.get("output", []):
-                if item.get("type") == "output_text" and item.get("text"):
-                    return parse_json_blob(item["text"])
-        if "response" in data and isinstance(data["response"], dict):
-            for item in data["response"].get("output", []):
-                if item.get("type") == "output_text" and item.get("text"):
-                    return parse_json_blob(item["text"])
+            text_variants.extend(
+                item.get("text")
+                for item in data.get("output", [])
+                if isinstance(item, dict)
+                and item.get("type") == "output_text"
+                and item.get("text")
+            )
+        response_section = data.get("response")
+        if isinstance(response_section, dict):
+            text_variants.extend(
+                item.get("text")
+                for item in response_section.get("output", [])
+                if isinstance(item, dict)
+                and item.get("type") == "output_text"
+                and item.get("text")
+            )
         if data.get("output_text"):
-            return parse_json_blob(data["output_text"])
+            text_variants.append(data["output_text"])
+
+        for text in text_variants:
+            try:
+                return parse_json_blob(text)
+            except ValueError:
+                continue
         return None
 
     def generate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
