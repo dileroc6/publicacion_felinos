@@ -181,22 +181,58 @@ def parse_json_blob(raw_text: str) -> Dict[str, Any]:
     cleaned = cleaned.rstrip("* \n\r\t")
     logger = logging.getLogger("OpenAIParser")
 
+    def _escape_control_in_strings(text: str) -> str:
+        if not text:
+            return text
+        result = []
+        in_string = False
+        escaped = False
+        for char in text:
+            if in_string:
+                if escaped:
+                    result.append(char)
+                    escaped = False
+                elif char == "\\":
+                    result.append(char)
+                    escaped = True
+                elif char == '"':
+                    result.append(char)
+                    in_string = False
+                elif char == "\n":
+                    result.append("\\n")
+                elif char == "\r":
+                    result.append("\\r")
+                elif char == "\t":
+                    result.append("\\t")
+                else:
+                    result.append(char)
+            else:
+                if char == '"':
+                    in_string = True
+                result.append(char)
+        return "".join(result)
+
+    def _candidate_variants(text: str) -> Iterable[str]:
+        yield text
+        escaped_newlines = _escape_control_in_strings(text)
+        if escaped_newlines != text:
+            yield escaped_newlines
+        escaped_html = escaped_newlines.replace('"<', '\\"<').replace('>"', '>\\"')
+        if escaped_html != escaped_newlines:
+            yield escaped_html
+
     def _try_load(text: str) -> Optional[Dict[str, Any]]:
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            text = text.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-            # Escape unescaped double quotes that might appear inside HTML attributes
-            text = text.replace('"<', '\\"<').replace('>"', '>\\"')
+        for candidate in _candidate_variants(text):
             try:
-                return json.loads(text)
+                return json.loads(candidate)
             except json.JSONDecodeError:
-                # Last resort: wrap interior double quotes
-                text = re.sub(r'(?<!\\)"', '\\"', text)
-                try:
-                    return json.loads(text)
-                except json.JSONDecodeError:
-                    return None
+                continue
+        # Last resort: escape remaining double quotes that are not already escaped
+        escaped = re.sub(r'(?<!\\)"', '\\"', text)
+        try:
+            return json.loads(escaped)
+        except json.JSONDecodeError:
+            return None
 
     result = _try_load(cleaned)
     if result is not None:
@@ -545,10 +581,18 @@ class OpenAIClient:
         }
         payload = {
             "model": self._model,
-            "input": prompt,
+            "input": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
             "temperature": 0.4,
             "max_output_tokens": 4000,
-            "response_format": self._response_format,
+            "text": {
+                "format": "json_schema",
+                "schema": AI_RESPONSE_SCHEMA,
+            },
         }
         try:
             response = requests.post(
@@ -572,21 +616,14 @@ class OpenAIClient:
         except ValueError:
             self._logger.warning("OpenAI /responses envió un cuerpo no JSON")
             return None
-        output = data.get("output") or []
-        for item in output:
-            for content in item.get("content", []):
-                if content.get("type") == "output_json" and "json" in content:
-                    return content["json"]
-                if content.get("type") == "output_text" and content.get("text"):
-                    return parse_json_blob(content["text"])
-        if isinstance(data.get("response"), dict):
-            response_payload = data["response"]
-            if isinstance(response_payload.get("output"), list):
-                for item in response_payload.get("output", []):
-                    if item.get("type") == "output_json" and "json" in item:
-                        return item["json"]
-                    if item.get("type") == "output_text" and item.get("text"):
-                        return parse_json_blob(item["text"])
+        if "output" in data:
+            for item in data.get("output", []):
+                if item.get("type") == "output_text" and item.get("text"):
+                    return parse_json_blob(item["text"])
+        if "response" in data and isinstance(data["response"], dict):
+            for item in data["response"].get("output", []):
+                if item.get("type") == "output_text" and item.get("text"):
+                    return parse_json_blob(item["text"])
         if data.get("output_text"):
             return parse_json_blob(data["output_text"])
         return None
