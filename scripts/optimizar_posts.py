@@ -81,6 +81,19 @@ def truncate_text(text: str, max_chars: int) -> str:
     return text[: max_chars - 3] + "..."
 
 
+def coerce_json_friendly(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure strings we send to the prompt are JSON-safe."""
+    safe: Dict[str, Any] = {}
+    for key, value in payload.items():
+        if isinstance(value, str):
+            cleaned = value.replace("\r\n", "\n").replace("\r", "\n")
+            cleaned = cleaned.replace("\t", " ")
+            safe[key] = cleaned
+        else:
+            safe[key] = value
+    return safe
+
+
 @dataclass
 class SheetRecord:
     """Holds a single row from a sheet along with metadata."""
@@ -493,7 +506,7 @@ def ensure_prompt_payload(
         or sheet_recommendations.get("Variacion Trafico", ""),
         "serp_location": config.serp_location,
     }
-    return payload
+    return coerce_json_friendly(payload)
 
 
 def prepare_wp_update(payload: Dict[str, Any]) -> Dict[str, Any]:
