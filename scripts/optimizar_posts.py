@@ -159,7 +159,10 @@ class GoogleSheetsClient:
             ) from exc
         values = response.get("values", [])
         if not values:
-            raise RuntimeError(f"Sheet '{tab_name}' is empty or unreadable")
+            raise RuntimeError(
+                f"Sheet '{resolved_name}' no contiene filas (se obtuvo un dataset vacío). "
+                "Añade encabezados y al menos una fila de datos o ajusta TARGET_CONTENT_SHEET."
+            )
         headers = values[0]
         records = []
         for offset, row in enumerate(values[1:], start=2):
@@ -363,24 +366,45 @@ class OpenAIClient:
         self._model = model
         self._template = prompt_template
         self._logger = logging.getLogger(self.__class__.__name__)
+        self._use_responses = hasattr(self._client, "responses") and hasattr(
+            self._client.responses, "create"
+        )
+        if not self._use_responses and not hasattr(self._client, "chat"):
+            raise RuntimeError(
+                "El SDK de OpenAI instalado no expone ni 'responses' ni 'chat.completions'. Actualiza la dependencia."
+            )
 
     def generate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         prompt = self._template.substitute(payload)
         self._logger.debug("Sending prompt to OpenAI (%d chars)", len(prompt))
-        response = self._client.responses.create(
-            model=self._model,
-            input=prompt,
-            temperature=0.4,
-            max_output_tokens=4000,
-        )
-        text_chunks: List[str] = []
-        for item in getattr(response, "output", []):
-            for content in getattr(item, "content", []):
-                if getattr(content, "type", "") == "output_text":
-                    text_chunks.append(getattr(content, "text", ""))
-        if not text_chunks and hasattr(response, "output_text"):
-            text_chunks.append(getattr(response, "output_text", ""))
-        raw_text = "".join(text_chunks).strip()
+        raw_text = ""
+        if self._use_responses:
+            response = self._client.responses.create(
+                model=self._model,
+                input=prompt,
+                temperature=0.4,
+                max_output_tokens=4000,
+            )
+            text_chunks: List[str] = []
+            for item in getattr(response, "output", []):
+                for content in getattr(item, "content", []):
+                    if getattr(content, "type", "") == "output_text":
+                        text_chunks.append(getattr(content, "text", ""))
+            if not text_chunks and hasattr(response, "output_text"):
+                text_chunks.append(getattr(response, "output_text", ""))
+            raw_text = "".join(text_chunks).strip()
+        else:
+            chat = self._client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": "Eres un estratega SEO y copywriter senior."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.4,
+                max_tokens=4000,
+            )
+            if chat.choices:
+                raw_text = (chat.choices[0].message.content or "").strip()
         if not raw_text:
             raise RuntimeError("OpenAI returned an empty response")
         return json.loads(raw_text)
@@ -556,10 +580,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     wp_client = WordPressClient(config.wp_url, config.wp_user, config.wp_app_password)
 
     try:
+        logger.info("Cargando pestaña de control: %s", config.target_sheet)
         content_table = sheets.fetch_table(config.target_sheet)
+        logger.info("Cargando índice semántico: %s", config.index_sheet)
         index_table = sheets.fetch_table(config.index_sheet)
     except Exception as exc:  # pylint: disable=broad-except
-        logger.exception("Failed to load Google Sheets data: %s", exc)
+        logger.exception("Error al consultar Google Sheets: %s", exc)
         return 1
 
     processed_posts = 0
