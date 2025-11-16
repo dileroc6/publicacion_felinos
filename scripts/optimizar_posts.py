@@ -27,6 +27,74 @@ MAX_PROMPT_CURRENT_CONTENT_CHARS = 12000
 MAX_PROMPT_INDEX_ROWS = 40
 MAX_PROMPT_SERP_LINES = 5
 
+AI_RESPONSE_SCHEMA = {
+    "name": "seo_optimization_payload",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "seo_title": {"type": "string"},
+            "meta_description": {"type": "string"},
+            "h1": {"type": "string"},
+            "content_html": {"type": "string"},
+            "excerpt_200": {"type": "string"},
+            "h2_h3_outline": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "internal_links": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "anchor": {"type": "string"},
+                        "url": {"type": "string"},
+                    },
+                    "required": ["anchor", "url"],
+                    "additionalProperties": False,
+                },
+            },
+            "faq_items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string"},
+                        "answer_html": {"type": "string"},
+                    },
+                    "required": ["question", "answer_html"],
+                    "additionalProperties": False,
+                },
+            },
+            "secondary_keywords": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "serp_snippet_detected": {"type": "string"},
+            "ia_score": {"type": "number"},
+            "mejoras_aplicadas": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+        },
+        "required": [
+            "seo_title",
+            "meta_description",
+            "h1",
+            "content_html",
+            "excerpt_200",
+            "h2_h3_outline",
+            "internal_links",
+            "faq_items",
+            "secondary_keywords",
+            "serp_snippet_detected",
+            "ia_score",
+            "mejoras_aplicadas",
+        ],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
 
 def configure_logging(verbose: bool = False) -> None:
     """Configure root logger formatting."""
@@ -104,6 +172,8 @@ def parse_json_blob(raw_text: str) -> Dict[str, Any]:
         if cleaned.lower().startswith("json"):
             cleaned = cleaned[4:]
         cleaned = cleaned.strip()
+    cleaned = cleaned.lstrip("* \n\r\t")
+    cleaned = cleaned.rstrip("* \n\r\t")
     logger = logging.getLogger("OpenAIParser")
 
     def _try_load(text: str) -> Optional[Dict[str, Any]]:
@@ -443,6 +513,10 @@ class OpenAIClient:
         self._use_responses = hasattr(self._client, "responses") and hasattr(
             self._client.responses, "create"
         )
+        self._response_format = {
+            "type": "json_schema",
+            "json_schema": AI_RESPONSE_SCHEMA,
+        }
         if not self._use_responses and not hasattr(self._client, "chat"):
             raise RuntimeError(
                 "El SDK de OpenAI instalado no expone ni 'responses' ni 'chat.completions'. Actualiza la dependencia."
@@ -451,23 +525,29 @@ class OpenAIClient:
     def generate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         prompt = self._template.substitute(payload)
         self._logger.debug("Sending prompt to OpenAI (%d chars)", len(prompt))
-        raw_text = ""
         if self._use_responses:
             response = self._client.responses.create(
                 model=self._model,
                 input=prompt,
                 temperature=0.4,
                 max_output_tokens=4000,
-                response_format={"type": "json_object"},
+                response_format=self._response_format,
             )
-            text_chunks: List[str] = []
             for item in getattr(response, "output", []):
                 for content in getattr(item, "content", []):
-                    if getattr(content, "type", "") == "output_text":
-                        text_chunks.append(getattr(content, "text", ""))
-            if not text_chunks and hasattr(response, "output_text"):
-                text_chunks.append(getattr(response, "output_text", ""))
-            raw_text = "".join(text_chunks).strip()
+                    if hasattr(content, "json") and content.json is not None:  # type: ignore[attr-defined]
+                        return content.json  # type: ignore[attr-defined]
+                    text = getattr(content, "text", "")
+                        
+                    if isinstance(text, str) and text.strip():
+                        return parse_json_blob(text)
+            if hasattr(response, "output_json"):
+                return getattr(response, "output_json")
+            if hasattr(response, "output_text"):
+                text = getattr(response, "output_text", "")
+                if text:
+                    return parse_json_blob(text)
+            raise RuntimeError("OpenAI response did not include JSON content")
         else:
             chat = self._client.chat.completions.create(
                 model=self._model,
@@ -477,13 +557,15 @@ class OpenAIClient:
                 ],
                 temperature=0.4,
                 max_tokens=4000,
-                response_format={"type": "json_object"},
+                response_format=self._response_format,
             )
             if chat.choices:
-                raw_text = (chat.choices[0].message.content or "").strip()
-        if not raw_text:
-            raise RuntimeError("OpenAI returned an empty response")
-        return parse_json_blob(raw_text)
+                message = chat.choices[0].message
+                if hasattr(message, "parsed") and message.parsed is not None:
+                    return message.parsed  # type: ignore[arg-type]
+                if message.content:
+                    return parse_json_blob(message.content)
+        raise RuntimeError("OpenAI returned an empty response")
 
 
 def parse_date(value: str) -> Optional[datetime]:
