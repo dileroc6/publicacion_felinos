@@ -94,6 +94,27 @@ def coerce_json_friendly(payload: Dict[str, Any]) -> Dict[str, Any]:
     return safe
 
 
+def parse_json_blob(raw_text: str) -> Dict[str, Any]:
+    """Parse JSON coming from the model, handling common wrappers."""
+    if not raw_text:
+        raise ValueError("OpenAI returned an empty response")
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            segment = cleaned[start : end + 1]
+            return json.loads(segment)
+        raise
+
+
 @dataclass
 class SheetRecord:
     """Holds a single row from a sheet along with metadata."""
@@ -411,6 +432,7 @@ class OpenAIClient:
                 input=prompt,
                 temperature=0.4,
                 max_output_tokens=4000,
+                response_format={"type": "json_object"},
             )
             text_chunks: List[str] = []
             for item in getattr(response, "output", []):
@@ -429,12 +451,13 @@ class OpenAIClient:
                 ],
                 temperature=0.4,
                 max_tokens=4000,
+                response_format={"type": "json_object"},
             )
             if chat.choices:
                 raw_text = (chat.choices[0].message.content or "").strip()
         if not raw_text:
             raise RuntimeError("OpenAI returned an empty response")
-        return json.loads(raw_text)
+        return parse_json_blob(raw_text)
 
 
 def parse_date(value: str) -> Optional[datetime]:
