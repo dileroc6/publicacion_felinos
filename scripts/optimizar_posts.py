@@ -23,6 +23,9 @@ from zoneinfo import ZoneInfo
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 DEFAULT_TIMEZONE = "America/Bogota"
 SERP_API_ENDPOINT = "https://serpapi.com/search.json"
+MAX_PROMPT_CURRENT_CONTENT_CHARS = 12000
+MAX_PROMPT_INDEX_ROWS = 40
+MAX_PROMPT_SERP_LINES = 5
 
 
 def configure_logging(verbose: bool = False) -> None:
@@ -67,6 +70,15 @@ def column_index_to_letter(idx: int) -> str:
         idx, remainder = divmod(idx - 1, 26)
         result = chr(65 + remainder) + result
     return result
+
+
+def truncate_text(text: str, max_chars: int) -> str:
+    """Trim large blocks before sending them to the LLM."""
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3] + "..."
 
 
 @dataclass
@@ -301,27 +313,27 @@ class SerpClient:
         if paa := paa_source:
             questions = [item.get("question", "") for item in paa if item.get("question")]
             if questions:
-                blocks.append("People Also Ask:\n- " + "\n- ".join(questions[:10]))
+                blocks.append("People Also Ask:\n- " + "\n- ".join(questions[:MAX_PROMPT_SERP_LINES]))
         if organic := data.get("organic_results"):
             lines = []
-            for entry in organic[:10]:
+            for entry in organic[:MAX_PROMPT_SERP_LINES]:
                 title = entry.get("title", "")
                 url = entry.get("link", "")
-                snippet = entry.get("snippet", "")
+                snippet = truncate_text(entry.get("snippet", ""), 240)
                 lines.append(f"{title} | {url} | {snippet}")
             if lines:
                 blocks.append("Top competitors:\n- " + "\n- ".join(lines))
         if related := data.get("related_searches"):
             terms = [item.get("query", "") for item in related if item.get("query")]
             if terms:
-                blocks.append("Related searches: " + ", ".join(terms[:15]))
+                blocks.append("Related searches: " + ", ".join(terms[: MAX_PROMPT_SERP_LINES * 2]))
         if snippet := data.get("answer_box") or data.get("featured_snippet"):
             snippet_text = snippet.get("snippet") or snippet.get("answer") or ""
             blocks.append(f"Featured snippet candidate: {snippet_text}")
         if longtails := data.get("related_questions"):
             longtail_terms = [item.get("question", "") for item in longtails if item.get("question")]
             if longtail_terms:
-                blocks.append("Long-tail ideas: " + ", ".join(longtail_terms[:10]))
+                blocks.append("Long-tail ideas: " + ", ".join(longtail_terms[:MAX_PROMPT_SERP_LINES]))
         return "\n\n".join(blocks)
 
 
@@ -438,7 +450,8 @@ def format_sheet_slice(records: List[SheetRecord], limit: Optional[int] = None) 
     lines = []
     for record in records[: limit or len(records)]:
         parts = [f"{key}: {value}" for key, value in record.data.items() if value]
-        lines.append(" | ".join(parts))
+        if parts:
+            lines.append(" | ".join(parts))
     return "\n".join(lines)
 
 
@@ -461,13 +474,16 @@ def ensure_prompt_payload(
         or sheet_recommendations.get("Keywords Secundarias")
         or index_record.get("Keywords_Secundarias") if index_record else ""
     )
-    formatted_index = format_sheet_slice(index_table.records, limit=200)
+    formatted_index = format_sheet_slice(index_table.records, limit=MAX_PROMPT_INDEX_ROWS)
     formatted_serp = SerpClient.format_snapshot(serp_snapshot)
+    current_content = truncate_text(
+        post_payload.get("content", {}).get("rendered", ""), MAX_PROMPT_CURRENT_CONTENT_CHARS
+    )
     payload = {
         "post_url": record.get("URL") or post_payload.get("link", ""),
         "primary_keyword": primary_keyword,
         "secondary_keywords": secondary_keywords,
-        "current_content": post_payload.get("content", {}).get("rendered", ""),
+        "current_content": current_content,
         "sheet_recommendations": json.dumps(sheet_recommendations.data, ensure_ascii=False, indent=2),
         "index_context": formatted_index,
         "serp_overview": formatted_serp,
