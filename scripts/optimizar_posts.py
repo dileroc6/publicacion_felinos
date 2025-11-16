@@ -919,6 +919,8 @@ def update_sheet_rows(
     sheet_updates = {
         "Ultima_Optimización": today,
         "Keyword_Principal": optimized.get("primary_keyword", content_record.get("Keyword_Principal", "")),
+        # Desactivamos la bandera para evitar reprocesar el mismo post en el siguiente run
+        "Ejecutar_Accion": "NO",
     }
     sheets.batch_update_cells(content_table, content_record.row_number, sheet_updates)
     if not index_record:
