@@ -37,6 +37,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run SEO optimization pipeline
+        id: run_pipeline
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           WP_URL: ${{ secrets.WP_URL }}
@@ -46,6 +47,26 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           PYTHONUNBUFFERED: "1"
         run: |
+          set -o pipefail
           python scripts/optimizar_posts.py \
             --prompt-file prompts/optimizar_post.txt \
-            --max-posts ${MAX_POSTS_PER_RUN:-5}
+            --max-posts ${MAX_POSTS_PER_RUN:-5} | tee pipeline.log
+
+      - name: Notify Telegram
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STATUS: ${{ steps.run_pipeline.outcome }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "Telegram credentials not configured; skipping notification."
+            exit 0
+          fi
+
+          python scripts/send_telegram_summary.py \
+            --log-path pipeline.log \
+            --timezone America/Bogota \
+            --title "🚀 Pipeline publicacion" \
+            --status "${STATUS}"
