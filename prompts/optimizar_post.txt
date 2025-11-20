@@ -76,5 +76,7 @@ Return **only** valid JSON (no markdown, no explanation) with the following keys
 - Mention new or updated H2/H3 headings in the outline array.
 - Reflect the SEO decisions (Title, Meta, Internal links) inside the content.
 - Do not invent links or data not present in the index or inputs.
+- Keep `content_html` under 5000 characters (~700 words). Prioritize essential information and concise paragraphs.
+- Do not copy Table of Contents markup such as `<span class="ez-toc-section">`. Use clean heading tags only.
 
 If any input sections are empty, proceed with the remaining data and note assumptions in `mejoras_aplicadas`.
