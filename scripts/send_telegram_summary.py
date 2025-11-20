@@ -53,10 +53,8 @@ def build_summary(log_path: str) -> str:
                 failure_reasons.append(line.strip())
             if "ERROR" in line or "Failed" in line or "Traceback" in line:
                 errors.add(line.strip())
-    if optimized_count == 0 and optimized_line_count:
-        optimized_count = optimized_line_count
-    if skipped_count == 0 and skipped_line_count:
-        skipped_count = skipped_line_count
+    optimized_count = max(optimized_count, optimized_line_count)
+    skipped_count = max(skipped_count, skipped_line_count)
     # Si no hubo errores explícitos pero se registraron Skipping posts, muéstralos
     if failure_reasons and not errors:
         errors.update(failure_reasons)
