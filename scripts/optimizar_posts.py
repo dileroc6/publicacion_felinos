@@ -1069,6 +1069,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     processed_posts = 0
     skipped: List[str] = []
     failure_details: List[str] = []
+    notes: List[str] = []
     seen_posts: set[str] = set()
 
     index_by_id = {
@@ -1170,11 +1171,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger.info("Run complete: %d posts optimized, %d skipped", processed_posts, len(skipped))
     if skipped:
         logger.info("Skipped items: %s", ", ".join(skipped))
+    no_candidates = processed_posts == 0 and not skipped
+    if no_candidates:
+        note_msg = (
+            "No se encontraron posts con 'Ejecutar_Accion' = 'SI'. La hoja no marcó elementos pendientes."
+        )
+        notes.append(note_msg)
+        logger.info(note_msg)
+
     summary_payload = {
         "optimized": processed_posts,
         "skipped": len(skipped),
         "skipped_items": skipped,
         "failures": failure_details,
+        "notes": notes,
         "generated_at": datetime.now(ZoneInfo(config.timezone)).isoformat(),
     }
     try:
@@ -1195,6 +1205,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 env_file.write(f"PIPELINE_SUMMARY_PATH={summary_path}\n")
         except OSError as exc:  # pylint: disable=broad-except
             logger.debug("Unable to write pipeline stats to GITHUB_ENV: %s", exc)
+    if no_candidates:
+        return 0
     return 0 if processed_posts > 0 else 1
 
 
