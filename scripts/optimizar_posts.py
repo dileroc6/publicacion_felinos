@@ -1185,6 +1185,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.debug("Pipeline summary written to %s", summary_path)
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("Unable to write pipeline summary to %s: %s", summary_path, exc)
+
+    github_env = os.environ.get("GITHUB_ENV")
+    if github_env:
+        try:
+            with open(github_env, "a", encoding="utf-8") as env_file:
+                env_file.write(f"PIPELINE_OPTIMIZED={processed_posts}\n")
+                env_file.write(f"PIPELINE_SKIPPED={len(skipped)}\n")
+                env_file.write(f"PIPELINE_SUMMARY_PATH={summary_path}\n")
+        except OSError as exc:  # pylint: disable=broad-except
+            logger.debug("Unable to write pipeline stats to GITHUB_ENV: %s", exc)
     return 0 if processed_posts > 0 else 1
 
 

@@ -45,8 +45,10 @@ def build_summary(log_path: str, summary_path: Optional[str]) -> str:
     summary_data = _load_summary(summary_path)
     run_complete: Optional[str] = None
     skipped_items_line: Optional[str] = None
-    optimized_count = int(summary_data.get("optimized", 0)) if summary_data else 0
-    skipped_count = int(summary_data.get("skipped", 0)) if summary_data else 0
+    env_optimized = os.environ.get("PIPELINE_OPTIMIZED")
+    env_skipped = os.environ.get("PIPELINE_SKIPPED")
+    optimized_count = int(summary_data.get("optimized", env_optimized or 0)) if summary_data else int(env_optimized or 0)
+    skipped_count = int(summary_data.get("skipped", env_skipped or 0)) if summary_data else int(env_skipped or 0)
     summary_skipped_items = summary_data.get("skipped_items", []) if summary_data else []
     summary_failures = summary_data.get("failures", []) if summary_data else []
     optimized_line_count = 0
