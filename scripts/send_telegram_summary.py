@@ -6,7 +6,7 @@ import argparse
 import json
 import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Set
 
 import urllib.request
 from zoneinfo import ZoneInfo
@@ -27,16 +27,22 @@ def build_summary(log_path: str) -> str:
         return summary
     run_complete: Optional[str] = None
     skipped_items: Optional[str] = None
+    errors: Set[str] = set()
     with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
         for line in fh:
             if "Run complete:" in line:
                 run_complete = line.strip()
             if "Skipped items:" in line:
                 skipped_items = line.strip()
+            if "ERROR" in line or "Failed" in line or "Traceback" in line:
+                errors.add(line.strip())
     if run_complete:
         summary = run_complete
     if skipped_items:
         summary = summary + "\n" + skipped_items if summary else skipped_items
+    if errors:
+        truncated_errors = list(errors)[:3]
+        summary = summary + "\nErrores detectados:" + "\n" + "\n".join(truncated_errors)
     return summary
 
 
