@@ -67,6 +67,7 @@ jobs:
 
           python scripts/send_telegram_summary.py \
             --log-path pipeline.log \
+            --summary-path pipeline_summary.json \
             --timezone America/Bogota \
             --title "🚀 Pipeline publicacion" \
             --status "${STATUS}"

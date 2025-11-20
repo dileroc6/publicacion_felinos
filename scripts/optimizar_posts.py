@@ -1038,6 +1038,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.error(str(exc))
         return 1
 
+    summary_path = Path(os.environ.get("PIPELINE_SUMMARY_PATH", "pipeline_summary.json"))
+    try:
+        if summary_path.exists():
+            summary_path.unlink()
+    except OSError as exc:
+        logger.debug("Unable to clear previous summary file %s: %s", summary_path, exc)
+
     credentials = load_service_account_credentials(os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", ""))
     sheets = GoogleSheetsClient(credentials, config.sheet_id)
     serp_client = SerpClient(config.serp_api_key, config.serp_engine, config.serp_location)
@@ -1061,6 +1068,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     processed_posts = 0
     skipped: List[str] = []
+    failure_details: List[str] = []
     seen_posts: set[str] = set()
 
     index_by_id = {
@@ -1101,6 +1109,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             wp_post = wp_client.fetch_post(post_id, post_url)
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("Skipping post (cannot fetch WP content): %s", exc)
+            failure_details.append(
+                f"Fetch failed: {post_url or post_id_raw or 'desconocido'} -> {exc}"
+            )
             skipped.append(post_url or str(post_id))
             continue
         try:
@@ -1113,6 +1124,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             serp_snapshot = serp_client.fetch_snapshot(consulta_serp)
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("Skipping post (SERP lookup failed): %s", exc)
+            failure_details.append(
+                f"SERP failed: {post_url or post_id_raw or 'desconocido'} -> {exc}"
+            )
             skipped.append(post_url or str(post_id))
             continue
         try:
@@ -1129,6 +1143,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             optimized = ai_client.generate(payload)
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("Skipping post (OpenAI failure): %s", exc)
+            failure_details.append(
+                f"OpenAI failed: {post_url or post_id_raw or 'desconocido'} -> {exc}"
+            )
             skipped.append(post_url or str(post_id))
             continue
         try:
@@ -1145,11 +1162,29 @@ def main(argv: Optional[List[str]] = None) -> int:
             logger.info("Optimized post %s", post_url or wp_post.get("id"))
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("Failed to update post or sheets: %s", exc)
+            failure_details.append(
+                f"Update failed: {post_url or post_id_raw or 'desconocido'} -> {exc}"
+            )
             skipped.append(post_url or str(post_id))
 
     logger.info("Run complete: %d posts optimized, %d skipped", processed_posts, len(skipped))
     if skipped:
         logger.info("Skipped items: %s", ", ".join(skipped))
+    summary_payload = {
+        "optimized": processed_posts,
+        "skipped": len(skipped),
+        "skipped_items": skipped,
+        "failures": failure_details,
+        "generated_at": datetime.now(ZoneInfo(config.timezone)).isoformat(),
+    }
+    try:
+        summary_path.write_text(
+            json.dumps(summary_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.debug("Pipeline summary written to %s", summary_path)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("Unable to write pipeline summary to %s: %s", summary_path, exc)
     return 0 if processed_posts > 0 else 1
 
 

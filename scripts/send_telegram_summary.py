@@ -19,22 +19,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timezone", default="America/Bogota", help="IANA timezone for timestamp")
     parser.add_argument("--title", default="🚀 Pipeline publicacion", help="Message title")
     parser.add_argument("--status", default="unknown", help="Pipeline status (success/failure)")
+    parser.add_argument(
+        "--summary-path",
+        default="pipeline_summary.json",
+        help="Path to JSON summary produced by the pipeline",
+    )
     return parser.parse_args()
 
 
 RUN_COMPLETE_RE = re.compile(r"Run complete:\s*(?P<optimized>\d+) posts optimized,\s*(?P<skipped>\d+) skipped")
 
+def _load_summary(summary_path: Optional[str]) -> Optional[dict]:
+    if not summary_path or not os.path.isfile(summary_path):
+        return None
+    try:
+        with open(summary_path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
 
-def build_summary(log_path: str) -> str:
+
+def build_summary(log_path: str, summary_path: Optional[str]) -> str:
     if not os.path.isfile(log_path):
         return "Resumen no disponible"
+    summary_data = _load_summary(summary_path)
     run_complete: Optional[str] = None
-    skipped_items: Optional[str] = None
-    optimized_count = 0
-    skipped_count = 0
+    skipped_items_line: Optional[str] = None
+    optimized_count = int(summary_data.get("optimized", 0)) if summary_data else 0
+    skipped_count = int(summary_data.get("skipped", 0)) if summary_data else 0
+    summary_skipped_items = summary_data.get("skipped_items", []) if summary_data else []
+    summary_failures = summary_data.get("failures", []) if summary_data else []
     optimized_line_count = 0
     skipped_line_count = 0
-    errors: Set[str] = set()
+    errors: Set[str] = set(summary_failures)
     failure_reasons: List[str] = []
     with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
         for line in fh:
@@ -45,7 +62,7 @@ def build_summary(log_path: str) -> str:
                     optimized_count = int(match.group("optimized"))
                     skipped_count = int(match.group("skipped"))
             if "Skipped items:" in line:
-                skipped_items = line.strip()
+                skipped_items_line = line.strip()
             if "Optimized post" in line:
                 optimized_line_count += 1
             if "Skipping post" in line:
@@ -56,15 +73,17 @@ def build_summary(log_path: str) -> str:
     optimized_count = max(optimized_count, optimized_line_count)
     skipped_count = max(skipped_count, skipped_line_count)
     # Si no hubo errores explícitos pero se registraron Skipping posts, muéstralos
-    if failure_reasons and not errors:
+    if failure_reasons and not summary_failures:
         errors.update(failure_reasons)
     summary_parts = []
     summary_parts.append(f"Posts optimizados: {optimized_count}")
     summary_parts.append(f"Posts omitidos: {skipped_count}")
     if run_complete:
         summary_parts.append(run_complete)
-    if skipped_items and skipped_items not in errors:
-        summary_parts.append(skipped_items)
+    if summary_skipped_items:
+        summary_parts.append("Skipped items: " + ", ".join(summary_skipped_items))
+    if skipped_items_line and skipped_items_line not in errors:
+        summary_parts.append(skipped_items_line)
     if errors:
         truncated_errors = []
         for item in sorted(errors)[:3]:
@@ -94,7 +113,7 @@ def main() -> None:
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         raise RuntimeError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set")
-    summary = build_summary(args.log_path)
+    summary = build_summary(args.log_path, args.summary_path)
     tz = ZoneInfo(args.timezone)
     now = datetime.now(timezone.utc).astimezone(tz)
     formatted_time = now.strftime("%Y-%m-%d %H:%M:%S")
