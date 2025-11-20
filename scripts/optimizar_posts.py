@@ -440,7 +440,7 @@ class PipelineConfig:
         env = os.environ
         max_posts = int(args.max_posts or env.get("MAX_POSTS_PER_RUN", "5"))
         try:
-            max_output_tokens = int(env.get("OPENAI_MAX_OUTPUT_TOKENS", "6000"))
+            max_output_tokens = int(env.get("OPENAI_MAX_OUTPUT_TOKENS", "3500"))
         except ValueError:
             max_output_tokens = 6000
         max_output_tokens = max(1000, max_output_tokens)
@@ -843,8 +843,18 @@ class OpenAIClient:
         prompt_base = self._template.substitute(payload)
         attempts = [
             prompt_base,
-            f"{prompt_base}\n\nIMPORTANTE: Devuelve únicamente el objeto JSON válido solicitado. No añadas comentarios, marcadores ni markdown.",
-            f"{prompt_base}\n\nDEVUELVE SOLO EL JSON SOLICITADO. Limita `content_html` a un máximo de 850 palabras (aprox. 6000 caracteres) priorizando la información esencial. Asegúrate de escapar correctamente comillas y caracteres especiales.",
+            (
+                f"{prompt_base}\n\nIMPORTANTE: Devuelve únicamente el objeto JSON válido solicitado. No añadas comentarios, marcadores ni markdown. "
+                "Evita copiar etiquetas '<span class=\"ez-toc-section\">' u otras marcas de TOC; utiliza solo encabezados limpios."
+            ),
+            (
+                f"{prompt_base}\n\nDEVUELVE SOLO EL JSON SOLICITADO. Limita `content_html` a un máximo de 5000 caracteres (aprox. 700 palabras), con párrafos compactos y sin listas interminables. "
+                "Garantiza que cada cadena esté escapada correctamente."
+            ),
+            (
+                f"{prompt_base}\n\nÚLTIMO INTENTO: Devuelve únicamente el JSON. Reduce `content_html` a un máximo de 2800 caracteres (~400 palabras), con hasta 4 encabezados H2 y respuestas de FAQ muy concisas. "
+                "No incluyas tablas ni span personalizados."
+            ),
         ]
         last_error: Optional[Exception] = None
         for attempt_index, prompt in enumerate(attempts, start=1):
