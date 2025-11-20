@@ -22,11 +22,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_summary(log_path: str) -> str:
-    summary = "Resumen no disponible"
     if not os.path.isfile(log_path):
-        return summary
+        return "Resumen no disponible"
     run_complete: Optional[str] = None
     skipped_items: Optional[str] = None
+    optimized_count = 0
+    skipped_count = 0
     errors: Set[str] = set()
     with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
         for line in fh:
@@ -34,16 +35,26 @@ def build_summary(log_path: str) -> str:
                 run_complete = line.strip()
             if "Skipped items:" in line:
                 skipped_items = line.strip()
+            if "Optimized post" in line:
+                optimized_count += 1
+            if "Skipping post" in line:
+                skipped_count += 1
+                errors.add(line.strip())
             if "ERROR" in line or "Failed" in line or "Traceback" in line:
                 errors.add(line.strip())
+    summary_parts = []
+    if optimized_count:
+        summary_parts.append(f"Posts optimizados: {optimized_count}")
+    if skipped_count:
+        summary_parts.append(f"Posts omitidos: {skipped_count}")
     if run_complete:
-        summary = run_complete
-    if skipped_items:
-        summary = summary + "\n" + skipped_items if summary else skipped_items
+        summary_parts.append(run_complete)
+    if skipped_items and skipped_items not in errors:
+        summary_parts.append(skipped_items)
     if errors:
         truncated_errors = list(errors)[:3]
-        summary = summary + "\nErrores detectados:" + "\n" + "\n".join(truncated_errors)
-    return summary
+        summary_parts.append("Errores detectados:\n" + "\n".join(truncated_errors))
+    return "\n".join(summary_parts) if summary_parts else "Resumen no disponible"
 
 
 def send_message(token: str, chat_id: str, text: str) -> None:
