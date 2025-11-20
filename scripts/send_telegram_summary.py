@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from datetime import datetime, timezone
-from typing import Optional, Set
+from typing import List, Optional, Set
 
 import urllib.request
 from zoneinfo import ZoneInfo
@@ -21,6 +22,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+RUN_COMPLETE_RE = re.compile(r"Run complete:\s*(?P<optimized>\d+) posts optimized,\s*(?P<skipped>\d+) skipped")
+
+
 def build_summary(log_path: str) -> str:
     if not os.path.isfile(log_path):
         return "Resumen no disponible"
@@ -29,31 +33,42 @@ def build_summary(log_path: str) -> str:
     optimized_count = 0
     skipped_count = 0
     errors: Set[str] = set()
+    failure_reasons: List[str] = []
     with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
         for line in fh:
             if "Run complete:" in line:
                 run_complete = line.strip()
+                match = RUN_COMPLETE_RE.search(line)
+                if match:
+                    optimized_count = max(optimized_count, int(match.group("optimized")))
+                    skipped_count = max(skipped_count, int(match.group("skipped")))
             if "Skipped items:" in line:
                 skipped_items = line.strip()
             if "Optimized post" in line:
                 optimized_count += 1
             if "Skipping post" in line:
                 skipped_count += 1
-                errors.add(line.strip())
+                failure_reasons.append(line.strip())
             if "ERROR" in line or "Failed" in line or "Traceback" in line:
                 errors.add(line.strip())
+    # Si no hubo errores explícitos pero se registraron Skipping posts, muéstralos
+    if failure_reasons and not errors:
+        errors.update(failure_reasons)
     summary_parts = []
-    if optimized_count:
-        summary_parts.append(f"Posts optimizados: {optimized_count}")
-    if skipped_count:
-        summary_parts.append(f"Posts omitidos: {skipped_count}")
+    summary_parts.append(f"Posts optimizados: {optimized_count}")
+    summary_parts.append(f"Posts omitidos: {skipped_count}")
     if run_complete:
         summary_parts.append(run_complete)
     if skipped_items and skipped_items not in errors:
         summary_parts.append(skipped_items)
     if errors:
-        truncated_errors = list(errors)[:3]
-        summary_parts.append("Errores detectados:\n" + "\n".join(truncated_errors))
+        truncated_errors = []
+        for item in sorted(errors)[:3]:
+            cleaned = item.strip()
+            if len(cleaned) > 220:
+                cleaned = cleaned[:217] + "..."
+            truncated_errors.append(cleaned)
+        summary_parts.append("Errores detectados:\n- " + "\n- ".join(truncated_errors))
     return "\n".join(summary_parts) if summary_parts else "Resumen no disponible"
 
 
