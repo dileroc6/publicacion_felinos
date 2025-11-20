@@ -32,6 +32,8 @@ def build_summary(log_path: str) -> str:
     skipped_items: Optional[str] = None
     optimized_count = 0
     skipped_count = 0
+    optimized_line_count = 0
+    skipped_line_count = 0
     errors: Set[str] = set()
     failure_reasons: List[str] = []
     with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
@@ -40,17 +42,21 @@ def build_summary(log_path: str) -> str:
                 run_complete = line.strip()
                 match = RUN_COMPLETE_RE.search(line)
                 if match:
-                    optimized_count = max(optimized_count, int(match.group("optimized")))
-                    skipped_count = max(skipped_count, int(match.group("skipped")))
+                    optimized_count = int(match.group("optimized"))
+                    skipped_count = int(match.group("skipped"))
             if "Skipped items:" in line:
                 skipped_items = line.strip()
             if "Optimized post" in line:
-                optimized_count += 1
+                optimized_line_count += 1
             if "Skipping post" in line:
-                skipped_count += 1
+                skipped_line_count += 1
                 failure_reasons.append(line.strip())
             if "ERROR" in line or "Failed" in line or "Traceback" in line:
                 errors.add(line.strip())
+    if optimized_count == 0 and optimized_line_count:
+        optimized_count = optimized_line_count
+    if skipped_count == 0 and skipped_line_count:
+        skipped_count = skipped_line_count
     # Si no hubo errores explícitos pero se registraron Skipping posts, muéstralos
     if failure_reasons and not errors:
         errors.update(failure_reasons)

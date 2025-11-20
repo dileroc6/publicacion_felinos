@@ -1,2 +1,4 @@
-2025-11-20 10:58:24 INFO pipeline: Optimized post https://example.com/a
-2025-11-20 10:58:24 INFO pipeline: Run complete: 5 posts optimized, 0 skipped
+2025-11-20 10:27:12 ERROR pipeline: Something bad
+2025-11-20 11:29:16 INFO pipeline: Optimized post A
+2025-11-20 11:29:42 INFO pipeline: Optimized post B
+2025-11-20 11:32:18 INFO pipeline: Run complete: 5 posts optimized, 0 skipped
