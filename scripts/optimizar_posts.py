@@ -18,7 +18,7 @@ import requests
 from dateutil import parser as date_parser
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from openai import OpenAI
+from openai import OpenAI, BadRequestError
 from zoneinfo import ZoneInfo
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -431,6 +431,7 @@ class PipelineConfig:
     serp_location: str
     openai_api_key: str
     openai_model: str
+    openai_max_output_tokens: int
     max_posts: int
     timezone: str = DEFAULT_TIMEZONE
 
@@ -438,6 +439,11 @@ class PipelineConfig:
     def from_env(cls, args: argparse.Namespace) -> "PipelineConfig":
         env = os.environ
         max_posts = int(args.max_posts or env.get("MAX_POSTS_PER_RUN", "5"))
+        try:
+            max_output_tokens = int(env.get("OPENAI_MAX_OUTPUT_TOKENS", "6000"))
+        except ValueError:
+            max_output_tokens = 6000
+        max_output_tokens = max(1000, max_output_tokens)
         return cls(
             sheet_id=env.get("SHEET_ID", ""),
             target_sheet=env.get("TARGET_CONTENT_SHEET", "Sheet_Final"),
@@ -451,6 +457,7 @@ class PipelineConfig:
             serp_location=env.get("SERP_API_LOCATION", "Colombia"),
             openai_api_key=env.get("OPENAI_API_KEY", ""),
             openai_model=env.get("OPENAI_MODEL", "gpt-4.1"),
+            openai_max_output_tokens=max_output_tokens,
             max_posts=max_posts,
             timezone=env.get("PIPELINE_TIMEZONE", DEFAULT_TIMEZONE),
         )
@@ -566,11 +573,15 @@ class WordPressClient:
 class OpenAIClient:
     """Thin wrapper around OpenAI responses API."""
 
-    def __init__(self, api_key: str, model: str, prompt_template: Template):
+    def __init__(self, api_key: str, model: str, prompt_template: Template, max_output_tokens: int):
         self._client = OpenAI(api_key=api_key)
         self._api_key = api_key
         self._model = model
         self._template = prompt_template
+        self._max_output_tokens = max_output_tokens
+        self._fallback_output_tokens = (
+            self._max_output_tokens if self._max_output_tokens <= 4000 else 4000
+        )
         self._logger = logging.getLogger(self.__class__.__name__)
         self._use_responses = hasattr(self._client, "responses") and hasattr(
             self._client.responses, "create"
@@ -618,6 +629,11 @@ class OpenAIClient:
             except Exception:  # pylint: disable=broad-except
                 pass
         return value
+
+    def _token_limit_candidates(self) -> Iterable[int]:
+        yield self._max_output_tokens
+        if self._fallback_output_tokens != self._max_output_tokens:
+            yield self._fallback_output_tokens
 
     def _extract_first_json(self, payload: Any) -> Optional[Dict[str, Any]]:
         obj = self._normalize(payload)
@@ -670,81 +686,110 @@ class OpenAIClient:
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        request_payload: Dict[str, Any] = {
-            "model": self._model,
-            "input": [
-                {
-                    "role": "system",
-                    "content": "Eres un estratega SEO que responde únicamente con JSON válido.",
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-            "temperature": 0.4,
-            "max_output_tokens": 4000,
-        }
-        # Algunos despliegues requieren schema vía text.format
-        request_payload["text"] = {
-            "format": "json_schema",
-            "json_schema": AI_RESPONSE_SCHEMA,
-        }
-        try:
-            response = requests.post(
-                OPENAI_RESPONSES_ENDPOINT,
-                headers=headers,
-                json=request_payload,
-                timeout=90,
-            )
-        except requests.RequestException as exc:  # pylint: disable=broad-except
-            self._logger.warning("Fallo al invocar OpenAI /responses: %s", exc)
-            return None
-        if response.status_code >= 300:
-            self._logger.warning(
-                "OpenAI /responses devolvió %s: %s",
-                response.status_code,
-                response.text[:200],
-            )
-            return None
-        try:
-            data = response.json()
-        except ValueError:
-            self._logger.warning("OpenAI /responses envió un cuerpo no JSON")
-            return None
-        try:
-            return self._extract_first_json(data)
-        except ValueError:
-            return None
+        for token_limit in self._token_limit_candidates():
+            request_payload: Dict[str, Any] = {
+                "model": self._model,
+                "input": [
+                    {
+                        "role": "system",
+                        "content": "Eres un estratega SEO que responde únicamente con JSON válido.",
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                "temperature": 0.4,
+                "max_output_tokens": token_limit,
+            }
+            # Algunos despliegues requieren schema vía text.format
+            request_payload["text"] = {
+                "format": "json_schema",
+                "json_schema": AI_RESPONSE_SCHEMA,
+            }
+            try:
+                response = requests.post(
+                    OPENAI_RESPONSES_ENDPOINT,
+                    headers=headers,
+                    json=request_payload,
+                    timeout=90,
+                )
+            except requests.RequestException as exc:  # pylint: disable=broad-except
+                self._logger.warning("Fallo al invocar OpenAI /responses: %s", exc)
+                return None
+            if response.status_code >= 300:
+                lower_body = response.text.lower()
+                if (
+                    token_limit != self._fallback_output_tokens
+                    and "max_output_tokens" in lower_body
+                ):
+                    self._logger.warning(
+                        "OpenAI /responses rechazó max_output_tokens=%d (%s). Reintentando con %d.",
+                        token_limit,
+                        response.status_code,
+                        self._fallback_output_tokens,
+                    )
+                    continue
+                self._logger.warning(
+                    "OpenAI /responses devolvió %s: %s",
+                    response.status_code,
+                    response.text[:200],
+                )
+                return None
+            try:
+                data = response.json()
+            except ValueError:
+                self._logger.warning("OpenAI /responses envió un cuerpo no JSON")
+                return None
+            try:
+                return self._extract_first_json(data)
+            except ValueError:
+                return None
+        return None
 
     def _invoke_prompt(self, prompt: str) -> Dict[str, Any]:
         self._logger.debug("Sending prompt to OpenAI (%d chars)", len(prompt))
         if self._use_responses:
-            response = self._client.responses.create(
-                model=self._model,
-                input=[
-                    {
-                        "role": "system",
-                        "content": [
+            for token_limit in self._token_limit_candidates():
+                try:
+                    response = self._client.responses.create(
+                        model=self._model,
+                        input=[
                             {
-                                "type": "text",
-                                "text": "Eres un estratega SEO que responde únicamente con JSON válido.",
-                            }
+                                "role": "system",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "Eres un estratega SEO que responde únicamente con JSON válido.",
+                                    }
+                                ],
+                            },
+                            {"role": "user", "content": [{"type": "text", "text": prompt}]},
                         ],
-                    },
-                    {"role": "user", "content": [{"type": "text", "text": prompt}]},
-                ],
-                temperature=0.4,
-                max_output_tokens=4000,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": AI_RESPONSE_SCHEMA,
-                },
-            )
-            result = self._extract_first_json(response)
-            if result is not None:
-                return result
-            raise RuntimeError("OpenAI response did not include JSON content")
+                        temperature=0.4,
+                        max_output_tokens=token_limit,
+                        response_format={
+                            "type": "json_schema",
+                            "json_schema": AI_RESPONSE_SCHEMA,
+                        },
+                    )
+                except BadRequestError as exc:
+                    message = str(exc).lower()
+                    if (
+                        token_limit != self._fallback_output_tokens
+                        and "max_output_tokens" in message
+                    ):
+                        self._logger.warning(
+                            "OpenAI responses rechazó max_output_tokens=%d. Reintentando con %d.",
+                            token_limit,
+                            self._fallback_output_tokens,
+                        )
+                        continue
+                    raise
+                result = self._extract_first_json(response)
+                if result is not None:
+                    return result
+                raise RuntimeError("OpenAI response did not include JSON content")
 
         if self._http_responses_enabled:
             direct = self._call_responses_endpoint(prompt)
@@ -754,32 +799,52 @@ class OpenAIClient:
                 "Falling back to chat.completions after responses HTTP attempt"
             )
 
-        chat = self._client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Eres un estratega SEO y copywriter senior. Responde únicamente con JSON válido conforme al esquema dado.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.4,
-            max_tokens=4000,
-            response_format=self._response_format,
-        )
-        if chat.choices:
-            message = chat.choices[0].message
-            result = self._extract_first_json(message)
-            if result is not None:
-                return result
+        last_completion = None
+        for token_limit in self._token_limit_candidates():
+            try:
+                chat = self._client.chat.completions.create(
+                    model=self._model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "Eres un estratega SEO y copywriter senior. Responde únicamente con JSON válido conforme al esquema dado.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.4,
+                    max_tokens=token_limit,
+                    response_format=self._response_format,
+                )
+            except BadRequestError as exc:
+                message = str(exc).lower()
+                if token_limit != self._fallback_output_tokens and "max_tokens" in message:
+                    self._logger.warning(
+                        "OpenAI chat rechazó max_tokens=%d. Reintentando con %d.",
+                        token_limit,
+                        self._fallback_output_tokens,
+                    )
+                    continue
+                raise
+            last_completion = chat
+            if chat.choices:
+                message = chat.choices[0].message
+                result = self._extract_first_json(message)
+                if result is not None:
+                    return result
+                finish_reason = getattr(chat.choices[0], "finish_reason", None)
+                if finish_reason:
+                    self._logger.warning(
+                        "OpenAI chat completions finalizó con finish_reason=%s", finish_reason
+                    )
+                raise RuntimeError("OpenAI response did not include JSON content")
         raise RuntimeError("OpenAI returned an empty response")
 
     def generate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         prompt_base = self._template.substitute(payload)
         attempts = [
             prompt_base,
-            f"{prompt_base}\n\nIMPORTANTE: Repite únicamente el objeto JSON válido y nada más.",
-            f"{prompt_base}\n\nDEVUELVE SOLO EL JSON SOLICITADO. No añadas comentarios ni marcadores.",
+            f"{prompt_base}\n\nIMPORTANTE: Devuelve únicamente el objeto JSON válido solicitado. No añadas comentarios, marcadores ni markdown.",
+            f"{prompt_base}\n\nDEVUELVE SOLO EL JSON SOLICITADO. Limita `content_html` a un máximo de 850 palabras (aprox. 6000 caracteres) priorizando la información esencial. Asegúrate de escapar correctamente comillas y caracteres especiales.",
         ]
         last_error: Optional[Exception] = None
         for attempt_index, prompt in enumerate(attempts, start=1):
@@ -967,7 +1032,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     sheets = GoogleSheetsClient(credentials, config.sheet_id)
     serp_client = SerpClient(config.serp_api_key, config.serp_engine, config.serp_location)
     prompt_template = load_prompt(args.prompt_file)
-    ai_client = OpenAIClient(config.openai_api_key, config.openai_model, prompt_template)
+    ai_client = OpenAIClient(
+        config.openai_api_key,
+        config.openai_model,
+        prompt_template,
+        config.openai_max_output_tokens,
+    )
     wp_client = WordPressClient(config.wp_url, config.wp_user, config.wp_app_password)
 
     try:
