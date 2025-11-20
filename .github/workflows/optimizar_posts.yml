@@ -2,8 +2,8 @@ name: Optimizar Posts SEO
 
 on:
   schedule:
-    # Runs Sundays at 23:00 America/Bogota (UTC-5)
-    - cron: "0 4 * * 1"
+    # Runs every 14 days at 03:30 America/Bogota (UTC-5 -> 08:30 UTC)
+    - cron: "30 8 */14 * *"
   workflow_dispatch:
 
 jobs:
