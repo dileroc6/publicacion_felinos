@@ -2,14 +2,42 @@ name: Optimizar Posts SEO
 
 on:
   schedule:
-    # Runs first Monday of each month at 03:30 America/Bogota (UTC-5 -> 08:30 UTC)
-    - cron: "30 8 1-7 * 1"
-    # Runs third Monday of each month at 03:30 America/Bogota (UTC-5 -> 08:30 UTC)
-    - cron: "30 8 15-21 * 1"
+    # Runs every Monday at 03:30 America/Bogota (08:30 UTC); logic below filters first/third Monday
+    - cron: "30 8 * * 1"
   workflow_dispatch:
 
 jobs:
+  schedule-check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - name: Determine if run should proceed
+        id: check
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "Manual trigger detected; proceeding."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          day=$(date -u +"%d")
+          day_num=$((10#$day))
+          if (( day_num >= 1 && day_num <= 7 )); then
+            echo "First Monday window detected (day $day_num)."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          elif (( day_num >= 15 && day_num <= 21 )); then
+            echo "Third Monday window detected (day $day_num)."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Outside first/third Monday window (day $day_num); skipping run." >&2
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   optimize-seo:
+    needs: schedule-check
+    if: ${{ needs.schedule-check.outputs.should_run == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -21,7 +49,7 @@ jobs:
       SERP_API_ENGINE: google
       SERP_API_LOCATION: Colombia
       OPENAI_MODEL: gpt-4.1
-      MAX_POSTS_PER_RUN: "5"
+      MAX_POSTS_PER_RUN: "10"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
