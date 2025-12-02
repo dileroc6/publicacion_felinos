@@ -1,10 +1,10 @@
 # Pipeline de Optimización SEO para Felinos
 
-Este repositorio automatiza la optimización SEO de contenidos publicados en WordPress usando datos maestros almacenados en Google Sheets, inteligencia SERP y generación asistida por IA. El flujo completo se ejecuta mediante un **GitHub Action** programado todos los domingos a las 23:00 (hora de Bogotá) o manualmente bajo demanda.
+Este repositorio automatiza la optimización SEO de contenidos publicados en WordPress usando datos maestros almacenados en Google Sheets, inteligencia SERP y generación asistida por IA. El flujo completo se ejecuta mediante un **GitHub Action** con una cadencia de **28 días** anclada al jueves 28-dic-2025 (ver detalle más abajo) o manualmente bajo demanda.
 
 ## Estructura principal
 
-- `.github/workflows/optimizar_posts.yml`: workflow de GitHub Actions que instala dependencias y ejecuta el script.
+- `.github/workflows/optimizar_posts.yml`: workflow de GitHub Actions que instala dependencias, ejecuta el script y controla la ventana de ejecución (guardia de 28 días).
 - `scripts/optimizar_posts.py`: orquestador Python 3.11 que conecta Google Sheets, WordPress, SERP API y OpenAI.
 - `prompts/optimizar_post.txt`: plantilla que se envía al modelo de IA con todo el contexto necesario.
 - `.env.example`: referencia de variables de entorno para ejecución local.
@@ -21,7 +21,7 @@ Este repositorio automatiza la optimización SEO de contenidos publicados en Wor
 	- `SERP_API_KEY`: clave de SerpAPI (u otro proveedor compatible).
 	- `OPENAI_API_KEY`: clave con acceso al modelo configurado.
 3. (Opcional) En la pestaña **Variables**, define:
-	- `MAX_POSTS_PER_RUN`: máximo de posts a procesar por ejecución (por defecto 5 si no existe).
+	- `MAX_POSTS_PER_RUN`: máximo de posts a procesar por ejecución (el workflow la fija actualmente en 10).
 	- Si necesitas cambiar la zona horaria o el modelo, puedes añadir `PIPELINE_TIMEZONE` o `OPENAI_MODEL` aquí mismo.
 
 ## Requisitos de terceros
@@ -60,6 +60,7 @@ Este repositorio automatiza la optimización SEO de contenidos publicados en Wor
 5. Construye el prompt con el contexto completo y lo envía a OpenAI.
 6. Recibe HTML optimizado + metadatos SEO, lo publica directamente en WordPress.
 7. Registra el cambio en `Logs_Optimización` y actualiza campos clave en el índice.
+8. Genera un resumen JSON (`pipeline_summary.json`) con el total de posts optimizados/omitidos y notas del run; el paso final envía una notificación a Telegram usando ese resumen y el log (`pipeline.log`).
 
 ## Depuración
 
@@ -69,7 +70,8 @@ Este repositorio automatiza la optimización SEO de contenidos publicados en Wor
 
 ## Ejecución programada y manual
 
-- El cron (`0 23 * * 0`) ejecuta el flujo cada domingo a las 23:00 hora de Bogotá.
-- Puedes lanzar el job manualmente desde la pestaña **Actions → Optimizar Posts SEO → Run workflow**.
+- El workflow se despierta **todos los días a las 04:00 hora de Colombia (09:00 UTC)**, pero el paso `schedule-check` sólo permite continuar cuando han transcurrido múltiplos exactos de 28 días desde el **jueves 28-dic-2025**. Las próximas fechas válidas después de esa ancla son 25-ene-2026, 22-feb-2026, etc.
+- Si el guardia detecta que todavía no toca ejecutar, el job principal se omite y se deja constancia en el log.
+- Cualquier ejecución manual (botón **Run workflow**) omite el guardia de calendario y procesa los posts de inmediato.
 
 Con los secretos configurados y las dependencias instaladas, el pipeline queda listo para mantener tu contenido optimizado sin intervención manual.
