@@ -2,8 +2,8 @@ name: Optimizar Posts SEO
 
 on:
   schedule:
-    # Runs every Monday at 03:30 America/Bogota (08:30 UTC); logic below filters first/third Monday
-    - cron: "30 8 * * 1"
+    # Wakes up daily at 04:00 America/Bogota (09:00 UTC); guard below enforces 28-day cadence
+    - cron: "0 9 * * *"
   workflow_dispatch:
 
 jobs:
@@ -22,16 +22,21 @@ jobs:
             exit 0
           fi
 
-          day=$(date -u +"%d")
-          day_num=$((10#$day))
-          if (( day_num >= 1 && day_num <= 7 )); then
-            echo "First Monday window detected (day $day_num)."
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-          elif (( day_num >= 15 && day_num <= 21 )); then
-            echo "Third Monday window detected (day $day_num)."
+          base_ts=$(date -u -d '2025-12-28' +%s)
+          now_ts=$(date -u +%s)
+
+          if (( now_ts < base_ts )); then
+            echo "Before anchor date 2025-12-28; skipping run." >&2
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          diff_days=$(( (now_ts - base_ts) / 86400 ))
+          if (( diff_days % 28 == 0 )); then
+            echo "28-day window hit (diff_days=$diff_days). Proceeding."
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Outside first/third Monday window (day $day_num); skipping run." >&2
+            echo "Outside 28-day window (diff_days=$diff_days); skipping run." >&2
             echo "should_run=false" >> "$GITHUB_OUTPUT"
           fi
 
